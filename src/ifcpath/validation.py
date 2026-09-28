@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 from collections import defaultdict, deque
+from dataclasses import asdict, dataclass, field
 
 from .model import InavModel
 
@@ -32,6 +32,7 @@ class ValidationReport:
 def validate_model(model: InavModel) -> ValidationReport:
     issues: list[ValidationIssue] = []
     node_ids = {node.id for node in model.nodes}
+    node_by_id = {node.id: node for node in model.nodes}
     adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
     portal_edge_counts: dict[str, int] = defaultdict(int)
 
@@ -60,6 +61,11 @@ def validate_model(model: InavModel) -> ValidationReport:
     component_count = len(components)
     largest = max((len(component) for component in components), default=0)
     ratio = largest / len(node_ids) if node_ids else 0.0
+    component_index = {
+        node_id: index
+        for index, component in enumerate(components)
+        for node_id in component
+    }
 
     if not node_ids:
         issues.append(ValidationIssue("error", "NO_NODES", "Navigation model contains no nodes"))
@@ -81,52 +87,92 @@ def validate_model(model: InavModel) -> ValidationReport:
             ))
 
     exits = [portal for portal in model.portals if portal.is_exit]
+    portal_side_failures = 0
     for portal in model.portals:
         portal_nodes = [node for node in model.nodes if node.portal_id == portal.id]
         edge_count = portal_edge_counts.get(portal.id, 0)
         if not portal_nodes:
             issues.append(ValidationIssue("warning", "PORTAL_NO_NODE", "Portal has no navigation node", portal.id))
-        if edge_count == 0 and portal_nodes:
-            # Older files may encode portal membership only on nodes, so also inspect graph degree.
-            if not any(adjacency.get(node.id) for node in portal_nodes):
-                issues.append(ValidationIssue("warning", "PORTAL_DISCONNECTED", "Portal is disconnected from navigation graph", portal.id))
+            continue
+        if edge_count == 0 and not any(adjacency.get(node.id) for node in portal_nodes):
+            issues.append(ValidationIssue("warning", "PORTAL_DISCONNECTED", "Portal is disconnected from navigation graph", portal.id))
+
+        # A semantic two-sided door must actually attach to nodes belonging to
+        # both spaces. This is a stronger topology invariant than global graph
+        # connectivity because buildings may contain independent wings/units.
+        attached_spaces: set[str] = set()
+        for portal_node in portal_nodes:
+            for neighbour_id in adjacency.get(portal_node.id, ()):
+                neighbour = node_by_id.get(neighbour_id)
+                if neighbour and neighbour.space_id:
+                    attached_spaces.add(neighbour.space_id)
+        expected_sides = {
+            side for side in (portal.from_space_id, portal.to_space_id) if side
+        }
+        missing_sides = expected_sides - attached_spaces
+        if missing_sides:
+            portal_side_failures += 1
+            issues.append(ValidationIssue(
+                "warning",
+                "PORTAL_MISSING_SIDE",
+                f"Portal is not attached to semantic side(s): {', '.join(sorted(missing_sides))}",
+                portal.id,
+            ))
 
     if model.portals and not exits:
         issues.append(ValidationIssue("warning", "NO_EXIT", "No portal is classified as an exit"))
 
     nodes_by_space: dict[str, int] = defaultdict(int)
     nodes_by_level: dict[str, int] = defaultdict(int)
+    space_components: dict[str, set[int]] = defaultdict(set)
     for node in model.nodes:
         if node.space_id:
             nodes_by_space[node.space_id] += 1
+            if node.kind != "portal" and node.id in component_index:
+                space_components[node.space_id].add(component_index[node.id])
         if node.level_id:
             nodes_by_level[node.level_id] += 1
 
+    split_spaces = 0
     for space in model.spaces:
         if nodes_by_space.get(space.id, 0) == 0:
             issues.append(ValidationIssue("warning", "SPACE_NO_NAV", "Space has no assigned navigation nodes", space.id))
+            continue
+        count = len(space_components.get(space.id, ()))
+        if count > 1:
+            split_spaces += 1
+            issues.append(ValidationIssue(
+                "warning",
+                "SPACE_SPLIT_COMPONENTS",
+                f"Space navigation is split across {count} graph components",
+                space.id,
+            ))
 
     for level in model.levels:
         if nodes_by_level.get(level.id, 0) == 0:
             issues.append(ValidationIssue("warning", "LEVEL_NO_NAV", "Level has no assigned navigation nodes", level.id))
 
-    # Every non-trivial component should ideally be able to reach an exit component.
     exit_node_ids = {
         node.id
         for node in model.nodes
         if node.portal_id and any(p.id == node.portal_id and p.is_exit for p in exits)
     }
+    exit_reachable_nodes = 0
+    exit_unreachable_nodes = len(node_ids)
+    exit_reachable_ratio = 0.0
     if exits and exit_node_ids:
         exit_component_nodes: set[str] = set()
         for component in components:
             if component & exit_node_ids:
                 exit_component_nodes |= component
-        unreachable = node_ids - exit_component_nodes
-        if unreachable:
+        exit_reachable_nodes = len(exit_component_nodes)
+        exit_unreachable_nodes = len(node_ids - exit_component_nodes)
+        exit_reachable_ratio = exit_reachable_nodes / len(node_ids) if node_ids else 0.0
+        if exit_unreachable_nodes:
             issues.append(ValidationIssue(
                 "warning",
                 "NODES_CANNOT_REACH_EXIT",
-                f"{len(unreachable)} navigation nodes cannot reach any classified exit",
+                f"{exit_unreachable_nodes} navigation nodes cannot reach any classified exit",
             ))
 
     error_count = sum(issue.severity == "error" for issue in issues)
@@ -145,6 +191,11 @@ def validate_model(model: InavModel) -> ValidationReport:
             "portals": len(model.portals),
             "exits": len(exits),
             "isolated_nodes": len(isolated_nodes),
+            "split_spaces": split_spaces,
+            "portal_side_failures": portal_side_failures,
+            "exit_reachable_nodes": exit_reachable_nodes,
+            "exit_unreachable_nodes": exit_unreachable_nodes,
+            "exit_reachable_ratio": exit_reachable_ratio,
             "errors": error_count,
             "warnings": warning_count,
         },
