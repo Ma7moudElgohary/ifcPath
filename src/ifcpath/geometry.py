@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Callable
 
 Vec3 = tuple[float, float, float]
 
@@ -71,7 +72,24 @@ def _sample_triangles(
     spacing_m: float,
     max_points: int,
 ) -> list[Vec3]:
+    """Sample triangles with a maximum grid step controlled by edge length.
+
+    Using ``sqrt(area)`` to choose subdivisions undersamples long, skinny IFC
+    triangles: a ten-metre triangle only a few centimetres wide can have a tiny
+    area and therefore receive just its corner samples. Basing subdivisions on
+    the longest edge keeps neighbouring samples within the requested spacing
+    regardless of triangle aspect ratio.
+
+    Shared triangle boundaries generate the same barycentric samples repeatedly,
+    so exact/near-exact duplicates are collapsed to keep the navigation graph
+    compact and to prevent duplicate samples from consuming nearest-neighbour
+    slots.
+    """
     points: list[Vec3] = []
+    seen: set[tuple[int, int, int]] = set()
+    spacing = max(spacing_m, 1e-3)
+    quantization = 1_000_000_000.0
+
     for a, b, c in triangles:
         area2 = math.dist((0, 0, 0), (
             (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),
@@ -81,16 +99,27 @@ def _sample_triangles(
         area = area2 * 0.5
         if area <= 1e-10:
             continue
-        divisions = max(1, int(math.ceil(math.sqrt(area) / max(spacing_m, 1e-3))))
+
+        longest_edge = max(distance(a, b), distance(b, c), distance(c, a))
+        divisions = max(1, int(math.ceil(longest_edge / spacing)))
         for i in range(divisions + 1):
             for j in range(divisions + 1 - i):
                 u, v = i / divisions, j / divisions
                 w = 1.0 - u - v
-                points.append((
+                point = (
                     u*a[0] + v*b[0] + w*c[0],
                     u*a[1] + v*b[1] + w*c[1],
                     u*a[2] + v*b[2] + w*c[2],
-                ))
+                )
+                key = (
+                    round(point[0] * quantization),
+                    round(point[1] * quantization),
+                    round(point[2] * quantization),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                points.append(point)
                 if len(points) >= max_points:
                     return points
     return points
@@ -100,8 +129,15 @@ def build_radius_edges(
     points: list[Vec3],
     max_distance_m: float,
     max_neighbors: int = 8,
+    candidate_filter: Callable[[int, int], bool] | None = None,
 ) -> list[tuple[int, int, float]]:
-    """Build a sparse local graph using spatial hashing and bounded neighbours."""
+    """Build a sparse local graph using spatial hashing and bounded neighbours.
+
+    ``candidate_filter`` is applied *before* nearest-neighbour truncation. This
+    is important for semantic navigation: invalid candidates across a wall or
+    into another IFC space must not consume the limited neighbour slots and
+    accidentally isolate a node from valid neighbours in its own space.
+    """
     if not points or max_distance_m <= 0 or max_neighbors <= 0:
         return []
 
@@ -121,8 +157,11 @@ def build_radius_edges(
                         if j == i:
                             continue
                         d = distance(p, points[j])
-                        if 1e-9 < d <= max_distance_m:
-                            candidates.append((d, j))
+                        if not 1e-9 < d <= max_distance_m:
+                            continue
+                        if candidate_filter is not None and not candidate_filter(i, j):
+                            continue
+                        candidates.append((d, j))
 
         candidates.sort(key=lambda item: item[0])
         for d, j in candidates[:max_neighbors]:
