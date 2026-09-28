@@ -136,7 +136,10 @@ def test_large_time_step_preserves_deterministic_phase_order() -> None:
     dispatcher.enqueue("a", "L1", "L2")
     dispatcher.enqueue("b", "L2", "L1")
 
-    dispatcher.advance(3.0)
+    # Two complete cycles are required: each is 0.5 s boarding + 1.0 s travel
+    # + 0.5 s alighting. Because the car ends the first trip at L2, request b
+    # needs no empty-car repositioning.
+    dispatcher.advance(4.0)
 
     assert dispatcher.completed_agent_ids == ("a", "b")
     assert dispatcher.idle
