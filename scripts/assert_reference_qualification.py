@@ -17,15 +17,20 @@ def main() -> None:
     stats = report.get("stats", {})
     nodes = report.get("node_count", 0)
     edges = report.get("edge_count", 0)
+    components = report.get("component_count", 0)
 
     if not report.get("valid", False):
         fail("validator reported errors")
     if nodes < 50:
         fail(f"too few navigation nodes: {nodes}")
+    if nodes > 4000:
+        fail(f"reference graph regressed to too many nodes: {nodes}")
     if edges < 40:
         fail(f"too few navigation edges: {edges}")
-    if edges > nodes * 12:
+    if edges > nodes * 8:
         fail(f"navigation graph is too dense: {edges} edges for {nodes} nodes")
+    if components > 6:
+        fail(f"reference graph fragmented into too many components: {components}")
     if stats.get("levels", 0) < 2:
         fail(f"expected a multi-level building, got {stats.get('levels', 0)} levels")
     if stats.get("spaces", 0) < 5:
@@ -34,9 +39,11 @@ def main() -> None:
         fail(f"too few door portals extracted: {stats.get('portals', 0)}")
     if stats.get("portal_side_failures", 0) != 0:
         fail(f"{stats.get('portal_side_failures')} semantic portals are missing one or more connected sides")
-    if stats.get("isolated_nodes", 0) > 5:
-        fail(f"too many isolated navigation nodes: {stats.get('isolated_nodes')}")
-    if stats.get("exit_reachable_ratio", 0.0) < 0.80:
+    if stats.get("isolated_nodes", 0) != 0:
+        fail(f"reference graph contains isolated navigation nodes: {stats.get('isolated_nodes')}")
+    if stats.get("split_spaces", 0) != 0:
+        fail(f"IFC spaces are internally split across graph components: {stats.get('split_spaces')}")
+    if stats.get("exit_reachable_ratio", 0.0) < 0.90:
         fail(
             "too little navigation can reach a classified exit: "
             f"{stats.get('exit_reachable_ratio', 0.0):.1%}"
@@ -46,7 +53,7 @@ def main() -> None:
     print(
         f"nodes={nodes} edges={edges} edge_ratio={edges / max(nodes, 1):.2f} "
         f"levels={stats.get('levels')} spaces={stats.get('spaces')} "
-        f"portals={stats.get('portals')} components={report.get('component_count')} "
+        f"portals={stats.get('portals')} components={components} "
         f"exit_reachable={stats.get('exit_reachable_ratio', 0.0):.1%} "
         f"split_spaces={stats.get('split_spaces')}"
     )

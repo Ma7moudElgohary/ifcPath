@@ -16,6 +16,8 @@ def main() -> None:
     build = sub.add_parser("build", help="Build an .inav file from IFC")
     build.add_argument("ifc")
     build.add_argument("-o", "--output", required=True)
+    build.add_argument("--floor-backend", choices=("cdt", "sampled"), default="cdt")
+    build.add_argument("--agent-clearance", type=float, default=0.0, help="Shrink CDT walkable polygons by this clearance in metres")
     build.add_argument("--floor-spacing", type=float, default=0.8)
     build.add_argument("--stair-spacing", type=float, default=0.25)
     build.add_argument("--connect-distance", type=float, default=1.25)
@@ -31,6 +33,8 @@ def main() -> None:
         model = build_from_ifc(
             args.ifc,
             BuildOptions(
+                floor_backend=args.floor_backend,
+                agent_clearance_m=max(0.0, args.agent_clearance),
                 floor_spacing_m=args.floor_spacing,
                 stair_spacing_m=args.stair_spacing,
                 connect_distance_m=args.connect_distance,
