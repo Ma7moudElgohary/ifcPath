@@ -4,7 +4,7 @@ import math
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QBrush
-from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
+from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView
 
 from ..model import InavModel
 
@@ -21,7 +21,7 @@ class NavigationPreview(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setBackgroundBrush(QColor("#10151c"))
-        self.setFrameShape(QGraphicsView.NoFrame)
+        self.setFrameShape(QFrame.NoFrame)
         self._model: InavModel | None = None
         self._level_id: str | None = None
         self._show_navmesh = True
@@ -114,10 +114,7 @@ class NavigationPreview(QGraphicsView):
                 continue
 
             x, y, _ = portal.position_m
-            if portal.is_exit:
-                color = QColor("#48d597")
-            else:
-                color = QColor("#ffad57")
+            color = QColor("#48d597") if portal.is_exit else QColor("#ffad57")
             pen = QPen(color, 0.0)
             pen.setCosmetic(True)
             self._scene.addEllipse(
