@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ifcpath"
+version = "0.1.0"
+description = "IFC to portable indoor-navigation graph generator for digital twins"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "ifcopenshell>=0.8.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+ifcpath = "ifcpath.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ifcpath"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
