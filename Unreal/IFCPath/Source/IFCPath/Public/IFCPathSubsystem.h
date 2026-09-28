@@ -39,7 +39,6 @@ struct FIFCPathCell
     UPROPERTY(BlueprintReadOnly)
     FString Id;
 
-    // Exactly three vertices in Unreal centimetres.
     UPROPERTY(BlueprintReadOnly)
     TArray<FVector> Vertices;
 
@@ -71,6 +70,38 @@ struct FIFCPathAdjacencyEntry
     FString PortalId;
 };
 
+struct FIFCPathHierarchyAnchor
+{
+    FString Id;
+    FString SpaceId;
+    FVector Position = FVector::ZeroVector;
+};
+
+struct FIFCPathHierarchyTransfer
+{
+    FString Id;
+    FString Kind;
+    FString PortalId;
+    FString FromSpaceId;
+    FString ToSpaceId;
+    FVector FromPoint = FVector::ZeroVector;
+    FVector ToPoint = FVector::ZeroVector;
+    TArray<FVector> Points;
+    bool bBidirectional = true;
+};
+
+struct FIFCPathHierarchyGraphEdge
+{
+    FString TargetId;
+    double CostCm = 0.0;
+    FString Kind;
+    FString FromSpaceId;
+    FString ToSpaceId;
+    FString TransitionId;
+    FString PortalId;
+    TArray<FVector> Points;
+};
+
 UCLASS()
 class IFCPATH_API UIFCPathSubsystem : public UGameInstanceSubsystem
 {
@@ -95,15 +126,25 @@ public:
         FString& OutStartNodeId,
         FString& OutGoalNodeId) const;
 
-    // Accurate local routing inside one CDT-backed IFC space. The triangle
-    // corridor is shortened with the funnel/string-pulling algorithm instead
-    // of returning the legacy centroid graph zig-zag.
     UFUNCTION(BlueprintCallable, Category="IFCPath|NavMesh")
     bool FindNavMeshPathFromWorldPositions(
         const FVector& StartWorldPosition,
         const FVector& GoalWorldPosition,
         TArray<FVector>& OutPoints,
         FString& OutSpaceId) const;
+
+    // Building-wide route: exact funnel geometry inside spaces plus semantic
+    // door/stair/ramp transfers between spaces and storeys. Dynamic blocked
+    // portals/spaces and space cost multipliers are applied during route search.
+    UFUNCTION(BlueprintCallable, Category="IFCPath|Hierarchical")
+    bool FindHierarchicalPathFromWorldPositions(
+        const FVector& StartWorldPosition,
+        const FVector& GoalWorldPosition,
+        TArray<FVector>& OutPoints,
+        TArray<FString>& OutSpaceIds,
+        TArray<FString>& OutTransitionIds,
+        float& OutLengthMeters,
+        float& OutWeightedCostMeters) const;
 
     UFUNCTION(BlueprintCallable, Category="IFCPath|Dynamic State")
     void SetPortalBlocked(const FString& PortalId, bool bBlocked);
@@ -154,6 +195,32 @@ private:
     double GetTraversalMultiplier(const FIFCPathNode& A, const FIFCPathNode& B) const;
 
     const FIFCPathCell* FindCellAtWorldPosition(const FVector& WorldPosition) const;
+    const FIFCPathCell* FindCellAtWorldPositionInSpace(
+        const FVector& WorldPosition,
+        const FString& SpaceId) const;
+    bool SnapPointToSpaceNavMesh(
+        const FVector& WorldPosition,
+        const FString& SpaceId,
+        double MaxDistanceCm,
+        FVector& OutPoint) const;
+    bool FindNavMeshPathInSpace(
+        const FVector& StartWorldPosition,
+        const FVector& GoalWorldPosition,
+        const FString& SpaceId,
+        TArray<FVector>& OutPoints) const;
+    bool FindLocalPathInSpace(
+        const FVector& StartWorldPosition,
+        const FVector& GoalWorldPosition,
+        const FString& SpaceId,
+        double MaxSnapDistanceCm,
+        TArray<FVector>& OutPoints) const;
+    void BuildHierarchyTransfers(TArray<FIFCPathHierarchyTransfer>& OutTransfers) const;
+    bool FindVerticalTransferPath(
+        const TSet<FString>& Component,
+        const FString& FromLandingId,
+        const FString& ToLandingId,
+        TArray<FVector>& OutPoints) const;
+
     bool FindCellCorridor(
         const FString& StartCellId,
         const FString& GoalCellId,
@@ -174,6 +241,9 @@ private:
         TArray<FVector>& OutPoints);
     static bool PointInCell2D(const FVector& Point, const FIFCPathCell& Cell);
     static FVector CellCentroid(const FIFCPathCell& Cell);
+    static FVector ClosestPointOnSegment2D(const FVector& Point, const FVector& A, const FVector& B);
+    static double PolylineLengthCm(const TArray<FVector>& Points);
+    static void AppendUniquePoints(TArray<FVector>& Target, const TArray<FVector>& Source);
     static double SignedArea2D(const FVector& A, const FVector& B, const FVector& C);
     static bool NearlyEqual2D(const FVector& A, const FVector& B, double ToleranceCm = 0.01);
 
