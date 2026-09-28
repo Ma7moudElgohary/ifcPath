@@ -1,6 +1,6 @@
 # IFCPath Builder Desktop
 
-The desktop Builder is a PySide6 application on top of the same engine used by the `ifcpath` CLI. It does not spawn the CLI as a subprocess; IFC generation, validation, route QA and export call the Python core directly.
+The desktop Builder is a PySide6 application on top of the same engine used by the `ifcpath` CLI. It does not spawn the CLI as a subprocess; IFC generation, validation, route QA, live simulation and export call the Python core directly.
 
 ## Install and run
 
@@ -27,7 +27,10 @@ The Builder supports:
 - live blocked-door and blocked-space scenarios;
 - smoke, fire and crowd route-cost scenarios;
 - automatic rerouting whenever scenario state changes;
-- a procedural low-poly 3D person agent at the route start;
+- a procedural low-poly 3D person agent;
+- live Walk / Pause / Restart simulation along the exact route;
+- configurable walking speed in metres/second;
+- rerouting from the person's current position during a live scenario change;
 - validation diagnostics and summary metrics;
 - `.inav` export;
 - drag/drop for IFC and INAV files;
@@ -93,7 +96,36 @@ Supported controls:
 
 If Start and Goal are already selected, every scenario edit recalculates the route immediately. The 3D preview overlays blocked doors with a red cross, blocked spaces in red, and hazard spaces with type-specific shading.
 
-The person agent is generated procedurally from triangular boxes plus a faceted head. It is approximately 1.72 m tall by default, stands at the exact picked Start XYZ, and rotates toward the first non-zero route segment. It is display-only and introduces no external mesh asset or licensing dependency.
+## Person agent and walking simulation
+
+The person agent is generated procedurally from triangular geometry and is approximately 1.72 m tall by default. It introduces no external mesh asset or character license dependency.
+
+After a valid route exists:
+
+1. Set the desired walking speed (default `1.35 m/s`).
+2. Press **Walk** to start the simulation.
+3. Press **Pause** to freeze the agent at its exact current XYZ.
+4. Press **Restart** to return to the original picked Start and recompute the current scenario route.
+
+Movement is based on travelled **3D polyline distance**, not screen interpolation. A sloped stair/ramp segment therefore consumes its real 3D length. The person rotates to follow the current horizontal travel direction and stops exactly at the destination.
+
+The status line reports travelled/total metres and percentage progress.
+
+### Dynamic rerouting while walking
+
+If a door is blocked or a Smoke/Fire/Crowd scenario changes while the person is already moving, IFCPath captures the agent's exact current XYZ and runs:
+
+```text
+current agent XYZ
+    ↓
+hierarchical route under new scenario state
+    ↓
+new local/door/stair/ramp path
+    ↓
+continue walking from current XYZ
+```
+
+The agent never jumps back to the original Start. If no route exists under the new scenario, the person stops at the current position and the obsolete route is invalidated. Walking cannot resume until a valid route exists again.
 
 ## Native desktop bundle
 
@@ -115,7 +147,7 @@ The packaging helper explicitly collects IFCPath desktop submodules plus IfcOpen
 
 ## CI
 
-The normal test job compiles all Python sources. The `desktop-smoke` job installs PySide6, uses Qt's `offscreen` platform and qualifies:
+The normal test job compiles all Python sources and qualifies the UI-independent route-walking engine. The `desktop-smoke` job installs PySide6, uses Qt's `offscreen` platform and qualifies:
 
 - main-window construction;
 - INAV model binding;
@@ -123,6 +155,9 @@ The normal test job compiles all Python sources. The `desktop-smoke` job install
 - screen-to-CDT world-point recovery;
 - hierarchical route calculation between selected world points;
 - procedural person-mesh geometry and rendering;
-- live scenario state without mutating the INAV model.
+- live scenario state without mutating the INAV model;
+- deterministic person movement;
+- live rerouting from the current agent position;
+- restart back to the original picked Start.
 
 A Windows packaging job also builds and uploads an `IFCPathBuilder-Windows` PyInstaller artifact.
