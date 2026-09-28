@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 import shapely
 from shapely.geometry import LineString, Polygon
@@ -13,6 +14,20 @@ from .geometry import Vec3, distance, triangle_normal
 
 
 Edge = tuple[int, int, float]
+
+
+@dataclass(slots=True)
+class CdtCellData:
+    vertices: tuple[Vec3, Vec3, Vec3]
+    neighbor_indices: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class CdtNavMeshResult:
+    points: list[Vec3] = field(default_factory=list)
+    edges: list[Edge] = field(default_factory=list)
+    point_cell_indices: list[int | None] = field(default_factory=list)
+    cells: list[CdtCellData] = field(default_factory=list)
 
 
 def prepare_space_floor(
@@ -33,9 +48,6 @@ def prepare_space_floor(
     if floor is None or floor.is_empty:
         return None
 
-    # Subtract fixed BIM obstacles before agent erosion. A negative buffer then
-    # shrinks the outer walkable boundary and expands obstacle holes by the same
-    # pedestrian clearance, which is the intended configuration-space behavior.
     obstacles = [
         obstacle
         for obstacle in obstacle_footprints
@@ -55,56 +67,91 @@ def prepare_space_floor(
     return floor
 
 
-def build_floor_cdt_graph(
+def build_floor_cdt_navmesh(
     floor,
     z: float,
     *,
     boundary_spacing_m: float = 1.0,
-) -> tuple[list[Vec3], list[Edge]]:
-    """Build a sparse CDT dual graph with explicit boundary anchor samples."""
+) -> CdtNavMeshResult:
+    """Build a constrained triangular navmesh plus its sparse dual graph.
+
+    The returned triangle cells are the authoritative local walkable geometry.
+    Centroid/boundary nodes remain for backward-compatible graph routing and for
+    attaching semantic portals. Keeping both representations lets consumers use
+    a triangle corridor + funnel algorithm without breaking existing graph-only
+    consumers.
+    """
+    result = CdtNavMeshResult()
     if floor is None or floor.is_empty:
-        return [], []
+        return result
 
     triangulation = shapely.constrained_delaunay_triangles(floor)
     triangle_polygons = [
         geometry
         for geometry in getattr(triangulation, "geoms", ())
-        if geometry.geom_type == "Polygon" and geometry.area > 1e-10
+        if geometry.geom_type == "Polygon"
+        and geometry.area > 1e-10
+        and floor.covers(geometry.representative_point())
     ]
     if not triangle_polygons:
-        return [], []
+        return result
 
-    points: list[Vec3] = []
     edge_owners: dict[tuple[tuple[int, int], tuple[int, int]], list[int]] = defaultdict(list)
-    edge_geometry: dict[tuple[tuple[int, int], tuple[int, int]], tuple[tuple[float, float], tuple[float, float]]] = {}
+    edge_geometry: dict[
+        tuple[tuple[int, int], tuple[int, int]],
+        tuple[tuple[float, float], tuple[float, float]],
+    ] = {}
     quantization = 1_000_000_000.0
 
+    # Triangle centroids occupy the first N point slots, one per cell.
     for triangle_index, triangle in enumerate(triangle_polygons):
-        centroid = triangle.centroid
-        points.append((float(centroid.x), float(centroid.y), z))
+        coords = list(triangle.exterior.coords)[:-1]
+        if len(coords) != 3:
+            continue
+        vertices = (
+            (float(coords[0][0]), float(coords[0][1]), z),
+            (float(coords[1][0]), float(coords[1][1]), z),
+            (float(coords[2][0]), float(coords[2][1]), z),
+        )
+        result.cells.append(CdtCellData(vertices=vertices))
 
-        coordinates = list(triangle.exterior.coords)
-        for start, end in zip(coordinates, coordinates[1:]):
+        centroid = triangle.centroid
+        result.points.append((float(centroid.x), float(centroid.y), z))
+        result.point_cell_indices.append(triangle_index)
+
+        ring = list(triangle.exterior.coords)
+        for start, end in zip(ring, ring[1:]):
             a = (round(start[0] * quantization), round(start[1] * quantization))
             b = (round(end[0] * quantization), round(end[1] * quantization))
             key = (a, b) if a <= b else (b, a)
             edge_owners[key].append(triangle_index)
-            edge_geometry.setdefault(key, ((float(start[0]), float(start[1])), (float(end[0]), float(end[1]))))
+            edge_geometry.setdefault(
+                key,
+                ((float(start[0]), float(start[1])), (float(end[0]), float(end[1]))),
+            )
 
-    edges: list[Edge] = []
     spacing = max(boundary_spacing_m, 0.1)
     for key, owners in edge_owners.items():
         if len(owners) == 2:
             a, b = owners
-            segment = LineString([(points[a][0], points[a][1]), (points[b][0], points[b][1])])
+            if a >= len(result.cells) or b >= len(result.cells):
+                continue
+            segment = LineString([
+                (result.points[a][0], result.points[a][1]),
+                (result.points[b][0], result.points[b][1]),
+            ])
             if floor.covers(segment):
-                edges.append((a, b, distance(points[a], points[b])))
+                result.edges.append((a, b, distance(result.points[a], result.points[b])))
+                result.cells[a].neighbor_indices.append(b)
+                result.cells[b].neighbor_indices.append(a)
             continue
 
         if len(owners) != 1:
             continue
 
         owner = owners[0]
+        if owner >= len(result.cells):
+            continue
         start, end = edge_geometry[key]
         length = math.dist(start, end)
         divisions = max(1, int(math.ceil(length / spacing)))
@@ -115,11 +162,55 @@ def build_floor_cdt_graph(
                 start[1] + (end[1] - start[1]) * t,
                 z,
             )
-            boundary_index = len(points)
-            points.append(boundary_point)
-            edges.append((owner, boundary_index, distance(points[owner], boundary_point)))
+            boundary_index = len(result.points)
+            result.points.append(boundary_point)
+            result.point_cell_indices.append(owner)
+            result.edges.append((
+                owner,
+                boundary_index,
+                distance(result.points[owner], boundary_point),
+            ))
 
-    return points, edges
+    return result
+
+
+def build_floor_cdt_graph(
+    floor,
+    z: float,
+    *,
+    boundary_spacing_m: float = 1.0,
+) -> tuple[list[Vec3], list[Edge]]:
+    result = build_floor_cdt_navmesh(
+        floor,
+        z,
+        boundary_spacing_m=boundary_spacing_m,
+    )
+    return result.points, result.edges
+
+
+def build_space_cdt_navmesh(
+    vertices: list[Vec3],
+    triangles: list[tuple[int, int, int]],
+    *,
+    floor_tolerance_m: float = 0.12,
+    max_slope_deg: float = 12.0,
+    clearance_m: float = 0.0,
+    boundary_spacing_m: float = 1.0,
+    obstacle_footprints: Iterable[BaseGeometry] = (),
+) -> CdtNavMeshResult:
+    floor = prepare_space_floor(
+        vertices,
+        triangles,
+        floor_tolerance_m=floor_tolerance_m,
+        max_slope_deg=max_slope_deg,
+        clearance_m=clearance_m,
+        obstacle_footprints=obstacle_footprints,
+    )
+    return build_floor_cdt_navmesh(
+        floor,
+        _floor_elevation(vertices),
+        boundary_spacing_m=boundary_spacing_m,
+    )
 
 
 def build_space_cdt_graph(
@@ -132,20 +223,16 @@ def build_space_cdt_graph(
     boundary_spacing_m: float = 1.0,
     obstacle_footprints: Iterable[BaseGeometry] = (),
 ) -> tuple[list[Vec3], list[Edge]]:
-    """Build a sparse metric graph from an IFC space floor using CDT."""
-    floor = prepare_space_floor(
+    result = build_space_cdt_navmesh(
         vertices,
         triangles,
         floor_tolerance_m=floor_tolerance_m,
         max_slope_deg=max_slope_deg,
         clearance_m=clearance_m,
+        boundary_spacing_m=boundary_spacing_m,
         obstacle_footprints=obstacle_footprints,
     )
-    return build_floor_cdt_graph(
-        floor,
-        _floor_elevation(vertices),
-        boundary_spacing_m=boundary_spacing_m,
-    )
+    return result.points, result.edges
 
 
 def space_floor_polygon(
@@ -155,7 +242,6 @@ def space_floor_polygon(
     floor_tolerance_m: float = 0.12,
     max_slope_deg: float = 12.0,
 ):
-    """Return the valid 2D polygonal footprint of the bottom of an IFC space."""
     if not vertices:
         return None
 

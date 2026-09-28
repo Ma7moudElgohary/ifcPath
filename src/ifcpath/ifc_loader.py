@@ -6,9 +6,9 @@ from pathlib import Path
 import ifcopenshell
 import ifcopenshell.geom
 
-from .cdt import build_space_cdt_graph
+from .cdt import build_space_cdt_navmesh
 from .geometry import build_radius_edges, sample_space_floor_triangles, sample_walkable_triangles
-from .model import InavModel, Level, NavEdge, NavNode, Portal, Space
+from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, Space
 from .obstacles import (
     edge_crosses_obstacle,
     mesh_obstacle_from_triangles,
@@ -72,6 +72,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     point_kinds: list[str] = []
     point_levels: list[str | None] = []
     point_spaces: list[str | None] = []
+    point_cell_ids: list[str | None] = []
     floor_space_ids: set[str] = set()
     cdt_space_ids: set[str] = set()
     sampled_space_ids: set[str] = set()
@@ -81,6 +82,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
 
     # Primary source: actual IfcSpace floor geometry. Fixed obstacles whose
     # vertical extents intersect pedestrian height are subtracted before CDT.
+    # The actual constrained triangles are persisted into INAV as NavCell data,
+    # while the existing centroid graph remains for backward compatibility.
     for entity, space in space_sources:
         mesh = _mesh(entity)
         if mesh is None:
@@ -98,21 +101,38 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
                     options.agent_height_m,
                 )
             ]
-            cdt_points, cdt_edges = build_space_cdt_graph(
+            cdt = build_space_cdt_navmesh(
                 mesh[0],
                 mesh[1],
                 clearance_m=options.agent_clearance_m,
                 obstacle_footprints=applicable_obstacles,
             )
-            if cdt_points:
+            if cdt.points:
                 base = len(points)
-                points.extend(cdt_points)
-                point_kinds.extend(["walk"] * len(cdt_points))
-                point_levels.extend([space.level_id] * len(cdt_points))
-                point_spaces.extend([space.id] * len(cdt_points))
-                indices = range(base, base + len(cdt_points))
+                local_cell_ids = [
+                    f"cell:{space.ifc_guid or space.id}:{index}"
+                    for index in range(len(cdt.cells))
+                ]
+                for index, cell in enumerate(cdt.cells):
+                    out.cells.append(NavCell(
+                        id=local_cell_ids[index],
+                        vertices_m=cell.vertices,
+                        space_id=space.id,
+                        level_id=space.level_id,
+                        neighbor_ids=[local_cell_ids[n] for n in cell.neighbor_indices],
+                    ))
+
+                points.extend(cdt.points)
+                point_kinds.extend(["walk"] * len(cdt.points))
+                point_levels.extend([space.level_id] * len(cdt.points))
+                point_spaces.extend([space.id] * len(cdt.points))
+                point_cell_ids.extend([
+                    local_cell_ids[cell_index] if cell_index is not None else None
+                    for cell_index in cdt.point_cell_indices
+                ])
+                indices = range(base, base + len(cdt.points))
                 cdt_floor_indices.update(indices)
-                prebuilt_floor_edges.extend((base + a, base + b, d) for a, b, d in cdt_edges)
+                prebuilt_floor_edges.extend((base + a, base + b, d) for a, b, d in cdt.edges)
                 floor_space_ids.add(space.id)
                 cdt_space_ids.add(space.id)
                 obstacle_space_applications += len(applicable_obstacles)
@@ -134,6 +154,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         point_kinds.extend(["walk"] * len(sampled))
         point_levels.extend([space.level_id] * len(sampled))
         point_spaces.extend([space.id] * len(sampled))
+        point_cell_ids.extend([None] * len(sampled))
 
     if not floor_space_ids:
         floor_entities = [
@@ -151,6 +172,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             point_kinds.extend(["walk"] * len(sampled))
             point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
+            point_cell_ids.extend([None] * len(sampled))
 
     ramp_entities = list(model.by_type("IfcRamp")) + list(model.by_type("IfcRampFlight"))
     stair_flights = list(model.by_type("IfcStairFlight"))
@@ -168,6 +190,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             point_kinds.extend([kind] * len(sampled))
             point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
+            point_cell_ids.extend([None] * len(sampled))
 
     out.nodes = []
     for i, p in enumerate(points):
@@ -177,6 +200,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             kind=point_kinds[i] if i < len(point_kinds) else "walk",
             level_id=point_levels[i] if i < len(point_levels) else None,
             space_id=point_spaces[i] if i < len(point_spaces) else None,
+            cell_id=point_cell_ids[i] if i < len(point_cell_ids) else None,
         ))
 
     for i, j, d in prebuilt_floor_edges:
@@ -340,6 +364,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     out.metadata.update({
         "node_count": len(out.nodes),
         "edge_count": len(out.edges),
+        "cell_count": len(out.cells),
         "space_count": len(out.spaces),
         "portal_count": len(out.portals),
         "floor_backend": options.floor_backend,
