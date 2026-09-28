@@ -86,7 +86,6 @@ def _ensure_vertical_transitions(model: InavModel) -> None:
         # when a landing is geometrically close to several rooms.
         landing_by_level: dict[str, tuple[float, str, float]] = {}
         for vertical_id in component:
-            vertical_node = node_by_id[vertical_id]
             for neighbour_id, edge_distance in adjacency.get(vertical_id, ()):
                 if neighbour_id in component:
                     continue
@@ -115,7 +114,7 @@ def _ensure_vertical_transitions(model: InavModel) -> None:
         # model a shared elevator car / stair / ramp resource instead of creating
         # an independent resource per floor-to-floor edge.
         representative = min(component)
-        resource_id = f"vertical:{kind}:{representative}"
+        resource_id = _vertical_resource_id(kind, component)
         for lower_level, upper_level in zip(ordered_levels, ordered_levels[1:]):
             lower_space = landing_by_level[lower_level][1]
             upper_space = landing_by_level[upper_level][1]
@@ -140,6 +139,35 @@ def _ensure_vertical_transitions(model: InavModel) -> None:
                 resource_id=resource_id,
             ))
             existing_pairs.add(pair_key)
+
+
+def _vertical_resource_id(kind: str, component: set[str]) -> str:
+    """Return a deterministic physical-resource identity for a vertical component.
+
+    IFC elevator extraction writes node IDs as ``elevator:{IfcGlobalId}:{level}``.
+    When every elevator node in one connected component carries the same GUID we
+    promote that GUID into the semantic resource identity. This is stable across
+    node ordering / resampling and lets adjacent floor transitions share one car.
+
+    Legacy/synthetic components without that convention keep the deterministic
+    representative-node fallback, so the additive schema change is backward
+    compatible with already generated INAV files.
+    """
+    normalized = kind.lower()
+    if normalized == "elevator":
+        guids: set[str] = set()
+        patterned_nodes = 0
+        for node_id in component:
+            if not node_id.startswith("elevator:"):
+                continue
+            parts = node_id.split(":", 2)
+            if len(parts) != 3 or not parts[1]:
+                continue
+            patterned_nodes += 1
+            guids.add(parts[1])
+        if patterned_nodes == len(component) and len(guids) == 1:
+            return f"elevator:{next(iter(guids))}"
+    return f"vertical:{kind}:{min(component)}"
 
 
 def _vertical_components(
