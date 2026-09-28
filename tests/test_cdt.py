@@ -47,6 +47,32 @@ def test_cdt_boundary_anchors_put_nodes_near_long_wall_doors():
     assert nearest <= 0.5 + 1e-9
 
 
+def test_cdt_subtracts_fixed_obstacle_from_free_space():
+    vertices = [
+        (0.0, 0.0, 0.0),
+        (6.0, 0.0, 0.0),
+        (6.0, 6.0, 0.0),
+        (0.0, 6.0, 0.0),
+    ]
+    triangles = [(0, 1, 2), (0, 2, 3)]
+    column = Polygon([(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)])
+
+    points, edges = build_space_cdt_graph(
+        vertices,
+        triangles,
+        obstacle_footprints=[column],
+    )
+
+    assert points
+    assert edges
+    obstacle_interior = column.buffer(-1e-6)
+    for point in points:
+        assert not obstacle_interior.contains(Point(point[0], point[1]))
+    for a, b, _ in edges:
+        line = LineString([(points[a][0], points[a][1]), (points[b][0], points[b][1])])
+        assert line.intersection(obstacle_interior).is_empty
+
+
 def test_cdt_clearance_can_remove_too_narrow_space():
     vertices = [
         (0.0, 0.0, 0.0),
