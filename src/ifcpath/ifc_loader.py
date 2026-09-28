@@ -136,12 +136,18 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         if obstacle is not None:
             wall_obstacles.append(obstacle)
 
-    blocked_walk_edges = 0
-    semantic_cross_space_edges = 0
+    # Filter impossible candidates before the bounded-neighbour selection.
+    # Otherwise nearby points across a wall/space boundary can consume all of a
+    # node's nearest-neighbour slots and leave it disconnected from valid points
+    # in its own room.
+    semantic_rejections: set[tuple[int, int]] = set()
+    obstacle_rejections: set[tuple[int, int]] = set()
     vertical_kinds = {"stair", "ramp"}
-    for i, j, d in build_radius_edges(points, options.connect_distance_m):
+
+    def candidate_allowed(i: int, j: int) -> bool:
         a_node = out.nodes[i]
         b_node = out.nodes[j]
+        pair = (i, j) if i < j else (j, i)
         is_vertical_transition = a_node.kind in vertical_kinds or b_node.kind in vertical_kinds
 
         if (
@@ -150,8 +156,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             and b_node.space_id
             and a_node.space_id != b_node.space_id
         ):
-            semantic_cross_space_edges += 1
-            continue
+            semantic_rejections.add(pair)
+            return False
 
         needs_geometry_check = not (
             a_node.space_id
@@ -163,11 +169,20 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             and not is_vertical_transition
             and edge_crosses_obstacle(points[i], points[j], wall_obstacles)
         ):
-            blocked_walk_edges += 1
-            continue
+            obstacle_rejections.add(pair)
+            return False
 
+        return True
+
+    for i, j, d in build_radius_edges(
+        points,
+        options.connect_distance_m,
+        candidate_filter=candidate_allowed,
+    ):
         out.edges.append(NavEdge(a=f"n:{i}", b=f"n:{j}", distance_m=d, kind="walk"))
 
+    blocked_walk_edges = len(obstacle_rejections)
+    semantic_cross_space_edges = len(semantic_rejections)
     explicit_portal_count = 0
     inferred_portal_count = 0
 
