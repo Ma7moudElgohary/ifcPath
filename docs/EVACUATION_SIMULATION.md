@@ -1,9 +1,9 @@
 # IFCPath Multi-Agent Evacuation Simulation
 
-The desktop Builder now exposes two complementary simulation layers on top of the same INAV hierarchy:
+The desktop Builder exposes two complementary simulation layers on top of the same INAV hierarchy:
 
 1. a **mesoscopic** route / capacity / queue simulator for fast BIM and Digital Twin studies;
-2. a **hybrid multi-floor** runtime that keeps IFCPath in charge of routing, gates and 3D vertical movement while delegating horizontal pedestrian motion to a replaceable local-motion backend.
+2. a **hybrid building-wide** runtime that keeps IFCPath in charge of routing, gates and semantic transfers while delegating local pedestrian interaction to a replaceable motion backend.
 
 The default remains the mesoscopic model because it is deterministic, lightweight and fast.
 
@@ -28,37 +28,46 @@ Exit selection is capacity-aware. When several exits/routes are possible, occupa
 The **Movement model** selector contains:
 
 - **Mesoscopic (fast)** — occupants advance on exact IFCPath route polylines; queues and capacities are modeled, but there is no shoulder-to-shoulder interaction.
-- **Hybrid deterministic** — uses the new building-wide handoff coordinator with the dependency-free kinematic floor backend. This exercises the same multi-floor runtime architecture as microscopic mode without claiming crowd physics.
-- **Hybrid microscopic (JuPedSim)** — horizontal floor movement uses the optional JuPedSim operational solver, while IFCPath continues to own semantic transitions, queues and actual 3D vertical travel.
+- **Hybrid deterministic** — uses the new building-wide semantic-handoff coordinator with the dependency-free kinematic local backend. This exercises the same runtime architecture as microscopic mode without claiming crowd physics.
+- **Hybrid microscopic (JuPedSim)** — local movement inside connected semantic spaces uses the optional JuPedSim operational solver, while IFCPath continues to own walls/portal boundaries, transition queues and exact transfer geometry.
 
 JuPedSim remains an optional dependency. A normal Builder installation can therefore remain lightweight. Selecting microscopic mode in a build without JuPedSim gives a clear message rather than crashing.
 
-## Hybrid multi-floor execution
+## Hybrid execution model
 
 A hierarchical evacuation plan is compiled into explicit execution steps:
 
 ```text
-horizontal level route
+local route in semantic space
         ↓
 transition capacity gate / queue
         ↓
-actual IFCPath 3D stair/ramp/elevator route
+exact IFCPath transfer route
         ↓
-destination-level local-motion backend
+destination semantic-space motion domain
         ↓
 ...
         ↓
 exit capacity gate
 ```
 
-There is one shared local-motion backend per active level, so pedestrians on the same floor participate in the same microscopic simulation.
+Every connected semantic motion domain has its own shared local-motion backend, so occupants in the same room/corridor/open area interact in the same microscopic simulation.
 
-When an occupant reaches a true vertical transition:
+### Same-floor doors and openings
 
-1. the semantic transition gate controls admission;
-2. the agent is removed from the origin-level solver;
-3. IFCPath advances the occupant on the transition's actual 3D polyline using the configured stair/ramp speed factor;
-4. the occupant is injected into the destination-level solver and resumes the existing route.
+Same-floor semantic portals are explicit handoffs too. This is important because two `IfcSpace` CDT polygons can be separated by wall thickness. JuPedSim requires connected accessible geometry, and artificially bridging disconnected room polygons would create a risk of walking through walls or bypassing a blocked door.
+
+The hybrid runtime therefore:
+
+1. moves the occupant to the transition approach point inside the origin space;
+2. applies the transition capacity gate;
+3. removes the occupant from the origin local solver;
+4. traverses the exact semantic transfer polyline;
+5. injects the occupant into the destination-space solver.
+
+### Vertical circulation
+
+Stairs, ramps, elevators and escalators use the same handoff lifecycle, but their transfer route can be fully 3D and uses the configured vertical speed factor.
 
 This avoids flattening multi-storey BIM geometry into a single 2D crowd domain.
 
@@ -100,7 +109,7 @@ Blocked portals, blocked spaces and Smoke / Fire / Crowd route-cost multipliers 
 
 If scenario state changes during a multi-person evacuation, every non-evacuated occupant is replanned from its exact current XYZ under the new state. Already evacuated occupants remain evacuated.
 
-For the hybrid runtime, the active level solvers are rebuilt during replan so stale native solver agents from the old route cannot survive a scenario change.
+For the hybrid runtime, active microscopic domains are rebuilt during replan so stale native solver agents from the old route cannot survive a scenario change.
 
 ## Metrics
 
@@ -126,12 +135,15 @@ The mesoscopic mode is intended for fast BIM/Digital Twin analysis of:
 - dynamic hazards and blocked routes;
 - evacuation-time comparisons.
 
-Hybrid microscopic mode adds floor-level pedestrian interaction and collision avoidance through JuPedSim. It still does **not** claim to model pushing, body compression, panic, calibrated demographic distributions, smoke toxicity, visibility impairment or CFD. Those effects require separately validated models and scenario inputs.
+Hybrid microscopic mode adds semantic-domain pedestrian interaction and collision avoidance through JuPedSim. It still does **not** claim to model pushing, body compression, panic, calibrated demographic distributions, smoke toxicity, visibility impairment or CFD. Those effects require separately validated models and scenario inputs.
 
 ## Qualification
 
 The normal CI suite verifies the dependency-free simulator, hybrid handoff architecture, Qt Builder integration and Windows packaging.
 
-A dedicated microscopic CI job installs the actual JuPedSim 1.4.2 wheel and verifies real solver motion plus an upper-floor → capacity gate → true 3D stair → lower-floor solver → exit evacuation.
+A dedicated microscopic CI job installs the actual JuPedSim 1.4.2 wheel and verifies real solver motion, including:
+
+- upper-floor → capacity gate → true 3D stair → lower-floor solver → exit;
+- disconnected same-floor room domains crossed through an explicit semantic door handoff instead of a fake connected floor polygon.
 
 The existing buildingSMART Duplex workflow remains the real-IFC regression for generation, validation and multi-person evacuation. It intentionally uses the default dependency set so the core product does not become dependent on the optional microscopic solver.
