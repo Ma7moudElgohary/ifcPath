@@ -138,6 +138,38 @@ Runtime state is kept separate from BIM preprocessing:
 - per-space cost multiplier for smoke, crowd density, security or other risk;
 - occupants already inside a newly blocked space can still escape; it is treated as **no-entry**, not a trap.
 
+### Multi-agent evacuation
+
+The desktop Builder supports three movement layers over the same INAV routing/semantic model:
+
+- **Mesoscopic (fast)** — deterministic route, capacity and queue simulation; the default.
+- **Hybrid deterministic** — the building-wide semantic handoff architecture with a dependency-free local-motion backend.
+- **Hybrid microscopic (JuPedSim)** — optional JuPedSim collision-aware local motion inside connected semantic spaces, while IFCPath remains authoritative for doors, walls, queues, stairs/ramps/elevators and live rerouting.
+
+Hybrid execution treats every semantic portal as an explicit handoff:
+
+```text
+local motion in space A
+    ↓
+door / transition capacity gate
+    ↓
+exact IFCPath transfer geometry
+    ↓
+local motion in space B
+    ↓
+... vertical 3D transfers use the same lifecycle ...
+    ↓
+exit gate
+```
+
+Microscopic domains are intentionally **space-local**, not a blindly unioned whole floor. This prevents a crowd solver from bypassing walls or blocked doors and satisfies JuPedSim's connected-accessible-area requirement. JuPedSim is optional and is installed with:
+
+```bash
+pip install -e ".[microscopic]"
+```
+
+The normal Windows Builder remains lightweight and runs the mesoscopic and hybrid-deterministic modes without JuPedSim. See [`docs/EVACUATION_SIMULATION.md`](docs/EVACUATION_SIMULATION.md) and [`docs/MICROSCOPIC_MOTION.md`](docs/MICROSCOPIC_MOTION.md).
+
 ## Generate INAV
 
 ```bash
