@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -106,6 +108,3 @@ def test_builder_calculates_route_between_picked_world_points() -> None:
 
     window.close()
     app.processEvents()
-
-
-import pytest
