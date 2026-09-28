@@ -89,6 +89,13 @@ class MicroscopicRouteController:
         )
         self._routes[agent_id] = state
 
+    def remove_agent(self, agent_id: str) -> None:
+        """Remove an agent so a higher-level coordinator can hand it elsewhere."""
+        if agent_id not in self._routes:
+            raise KeyError(agent_id)
+        self.backend.remove_agent(agent_id)
+        del self._routes[agent_id]
+
     def replace_remaining_route(
         self,
         agent_id: str,
