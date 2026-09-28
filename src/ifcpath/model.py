@@ -36,6 +36,26 @@ class Portal:
 
 
 @dataclass(slots=True)
+class SemanticTransition:
+    """High-level navigable connectivity independent of local metric geometry.
+
+    ``to_space_id=None`` represents a transition from an indoor space to the
+    exterior. Vertical transfers can use different ``from_level_id`` and
+    ``to_level_id`` once stair/ramp/elevator inference is added.
+    """
+
+    id: str
+    kind: str
+    from_space_id: str
+    to_space_id: str | None = None
+    portal_id: str | None = None
+    from_level_id: str | None = None
+    to_level_id: str | None = None
+    bidirectional: bool = True
+    source: str = "ifc"
+
+
+@dataclass(slots=True)
 class NavNode:
     id: str
     position_m: Vec3
@@ -56,12 +76,13 @@ class NavEdge:
 
 @dataclass(slots=True)
 class InavModel:
-    schema: str = "ifcpath.inav/0.1"
+    schema: str = "ifcpath.inav/0.2"
     units: str = "m"
     up_axis: str = "Z"
     levels: list[Level] = field(default_factory=list)
     spaces: list[Space] = field(default_factory=list)
     portals: list[Portal] = field(default_factory=list)
+    transitions: list[SemanticTransition] = field(default_factory=list)
     nodes: list[NavNode] = field(default_factory=list)
     edges: list[NavEdge] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
