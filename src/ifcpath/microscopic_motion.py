@@ -55,6 +55,10 @@ class LocalMotionBackend(Protocol):
     IFCPath remains responsible for BIM semantics, hierarchical routing, exits,
     hazards and route selection. A backend receives local targets and is only
     responsible for physically plausible pedestrian motion towards those targets.
+
+    ``snapshot().target_m`` is the backend's *effective* target. Backends may
+    project a requested route waypoint to the nearest physically valid agent-centre
+    position; route progression must use the effective target for completion.
     """
 
     name: str
@@ -81,12 +85,7 @@ class _KinematicState:
 
 
 class KinematicLocalMotionBackend:
-    """Deterministic no-interaction fallback implementing the backend contract.
-
-    This deliberately does *not* claim to be crowd physics. It exists so hosts,
-    tests and packaged builds can use the same local-motion interface when the
-    optional JuPedSim dependency is not installed.
-    """
+    """Deterministic no-interaction fallback implementing the backend contract."""
 
     name = "kinematic"
 
@@ -146,15 +145,13 @@ class KinematicLocalMotionBackend:
 class JuPedSimLocalMotionBackend:
     """JuPedSim adapter for one connected IFCPath horizontal motion domain.
 
-    The adapter intentionally uses a JuPedSim direct-steering stage. IFCPath owns
-    route choice and continuously supplies local targets; JuPedSim owns collision
-    avoidance and pedestrian interaction inside the supplied walkable domain.
+    The adapter uses a JuPedSim direct-steering stage. IFCPath owns route choice;
+    JuPedSim owns collision avoidance and pedestrian interaction inside the supplied
+    walkable domain.
 
-    ``space_id`` is optional for standalone/legacy level-local use. The hybrid
-    building-wide coordinator supplies it deliberately, because JuPedSim requires
-    one connected accessible area and semantic spaces separated by walls can be
-    disconnected even when they share the same storey. Doors/openings are handled
-    as IFCPath-owned transfer gates between those microscopic domains.
+    ``space_id`` is optional for standalone/legacy level-local use. Hybrid mode
+    supplies it because JuPedSim requires one connected accessible area and rooms
+    separated by walls can be disconnected even when they share the same storey.
     """
 
     name = "jupedsim"
@@ -224,7 +221,7 @@ class JuPedSimLocalMotionBackend:
         target_xy = _project_xy_inside(
             self.walkable_geometry,
             spec.target_m[:2],
-            self.config.target_inset_m,
+            max(radius + 1e-4, self.config.target_inset_m),
         )
         params_type = _agent_parameters_type(self._jps, self.config.model)
         params = params_type(
@@ -238,7 +235,11 @@ class JuPedSimLocalMotionBackend:
         native_id = int(self._simulation.add_agent(params))
         self._simulation.agent(native_id).target = target_xy
         self._agent_ids[spec.id] = native_id
-        self._targets[spec.id] = _vec3(spec.target_m)
+        self._targets[spec.id] = (
+            float(target_xy[0]),
+            float(target_xy[1]),
+            float(spec.target_m[2]),
+        )
         self._z_by_agent[spec.id] = float(spec.position_m[2])
 
     def remove_agent(self, agent_id: str) -> None:
@@ -253,13 +254,18 @@ class JuPedSimLocalMotionBackend:
     def set_target(self, agent_id: str, target_m: Vec3) -> None:
         native_id = self._agent_ids[agent_id]
         target = _vec3(target_m)
+        radius = _native_agent_radius(self._simulation.agent(native_id), self.config.default_radius_m)
         target_xy = _project_xy_inside(
             self.walkable_geometry,
             target[:2],
-            self.config.target_inset_m,
+            max(radius + 1e-4, self.config.target_inset_m),
         )
         self._simulation.agent(native_id).target = target_xy
-        self._targets[agent_id] = target
+        self._targets[agent_id] = (
+            float(target_xy[0]),
+            float(target_xy[1]),
+            float(target[2]),
+        )
 
     def advance(self, delta_seconds: float) -> None:
         self._accumulator_s += max(0.0, float(delta_seconds))
@@ -296,12 +302,7 @@ def build_level_walkable_geometry(
     *,
     space_id: str | None = None,
 ) -> BaseGeometry:
-    """Union IFCPath CDT triangles into a continuous 2D motion domain.
-
-    With ``space_id=None`` this preserves the original whole-level helper used by
-    standalone tests/consumers. Hybrid JuPedSim mode supplies a semantic space ID
-    so walls and blocked portals remain hard motion-domain boundaries.
-    """
+    """Union IFCPath CDT triangles into a continuous 2D motion domain."""
     triangles: list[Polygon] = []
     for cell in model.cells:
         if cell.level_id != level_id:
@@ -392,6 +393,15 @@ def _geometry_component_count(geometry: BaseGeometry) -> int:
     if geoms is None:
         return 1
     return sum(1 for part in geoms if not part.is_empty and part.area > _EPSILON)
+
+
+def _native_agent_radius(agent, fallback: float) -> float:
+    model = getattr(agent, "model", None)
+    radius = getattr(model, "radius", None) if model is not None else None
+    try:
+        return max(0.01, float(radius)) if radius is not None else max(0.01, float(fallback))
+    except (TypeError, ValueError):
+        return max(0.01, float(fallback))
 
 
 def _project_xy_inside(
