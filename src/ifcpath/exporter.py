@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .model import InavModel, Level, NavEdge, NavNode, Portal, SemanticTransition, Space
+from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, SemanticTransition, Space
 from .semantic import ensure_semantic_transitions
 
 
@@ -26,6 +26,7 @@ def load_inav(path: str | Path) -> InavModel:
         spaces=[Space(**_tuple_vec(x, "centroid_m")) for x in raw.get("spaces", [])],
         portals=[Portal(**_tuple_vec(x, "position_m")) for x in raw.get("portals", [])],
         transitions=[SemanticTransition(**x) for x in raw.get("transitions", [])],
+        cells=[NavCell(**_cell_value(x)) for x in raw.get("cells", [])],
         nodes=[NavNode(**_tuple_vec(x, "position_m")) for x in raw.get("nodes", [])],
         edges=[NavEdge(**x) for x in raw.get("edges", [])],
         metadata=raw.get("metadata", {}),
@@ -38,4 +39,11 @@ def _tuple_vec(value: dict, key: str) -> dict:
     value = dict(value)
     if value.get(key) is not None:
         value[key] = tuple(value[key])
+    return value
+
+
+def _cell_value(value: dict) -> dict:
+    value = dict(value)
+    value["vertices_m"] = tuple(tuple(vertex) for vertex in value.get("vertices_m", ()))
+    value["neighbor_ids"] = list(value.get("neighbor_ids", ()))
     return value
