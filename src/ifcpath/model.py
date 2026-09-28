@@ -37,13 +37,6 @@ class Portal:
 
 @dataclass(slots=True)
 class SemanticTransition:
-    """High-level navigable connectivity independent of local metric geometry.
-
-    ``to_space_id=None`` represents a transition from an indoor space to the
-    exterior. Vertical transfers can use different ``from_level_id`` and
-    ``to_level_id`` once stair/ramp/elevator inference is added.
-    """
-
     id: str
     kind: str
     from_space_id: str
@@ -56,6 +49,22 @@ class SemanticTransition:
 
 
 @dataclass(slots=True)
+class NavCell:
+    """Portable triangular navigation-mesh cell.
+
+    Cells preserve the constrained triangulation rather than only its centroid
+    graph. Consumers can therefore recover a triangle corridor and run a funnel
+    / string-pulling pass for a geometrically short route.
+    """
+
+    id: str
+    vertices_m: tuple[Vec3, Vec3, Vec3]
+    space_id: str | None = None
+    level_id: str | None = None
+    neighbor_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class NavNode:
     id: str
     position_m: Vec3
@@ -63,6 +72,7 @@ class NavNode:
     level_id: str | None = None
     space_id: str | None = None
     portal_id: str | None = None
+    cell_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -76,13 +86,14 @@ class NavEdge:
 
 @dataclass(slots=True)
 class InavModel:
-    schema: str = "ifcpath.inav/0.2"
+    schema: str = "ifcpath.inav/0.3"
     units: str = "m"
     up_axis: str = "Z"
     levels: list[Level] = field(default_factory=list)
     spaces: list[Space] = field(default_factory=list)
     portals: list[Portal] = field(default_factory=list)
     transitions: list[SemanticTransition] = field(default_factory=list)
+    cells: list[NavCell] = field(default_factory=list)
     nodes: list[NavNode] = field(default_factory=list)
     edges: list[NavEdge] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
