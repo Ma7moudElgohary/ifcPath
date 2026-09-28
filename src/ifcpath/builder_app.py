@@ -6,7 +6,7 @@ import sys
 def main() -> None:
     """Launch the optional IFCPath Builder desktop application."""
     try:
-        from .ui.main_window_3d import run_app_3d
+        from .ui.scenario_window import run_scenario_app
     except ModuleNotFoundError as exc:
         if exc.name and exc.name.startswith("PySide6"):
             print(
@@ -17,7 +17,7 @@ def main() -> None:
             raise SystemExit(2) from exc
         raise
 
-    raise SystemExit(run_app_3d())
+    raise SystemExit(run_scenario_app())
 
 
 if __name__ == "__main__":
