@@ -121,7 +121,7 @@ class EvacuationSimulator:
     """Deterministic multi-agent evacuation over IFCPath hierarchical routes.
 
     Agents move on exact route polylines while semantic transitions and exits act
-    as capacity-constrained gates. This is deliberately mesoscopic: it captures
+    as capacity-constrained gates. This is deliberately *mesoscopic*: it captures
     heterogeneous walking speeds, bottleneck queues, route/exit choice and live
     scenario constraints without pretending to be a full contact/collision crowd
     physics solver.
@@ -139,11 +139,11 @@ class EvacuationSimulator:
         self.options = options or HierarchicalRouteOptions()
         self.config = config or EvacuationConfig()
         self.elapsed_s = 0.0
-        self._portal_by_id = {portal.id: portal for portal in model.portals}
         self._states: dict[str, EvacuationAgentState] = {}
         self._gates: dict[str, GateState] = {}
         self._exit_usage: dict[str, int] = {}
         self._projected_gate_loads: dict[str, int] = {}
+        self._historical_max_queue = 0
 
         for spec in sorted(agents, key=lambda item: item.id):
             plan = self._choose_plan(spec)
@@ -187,6 +187,10 @@ class EvacuationSimulator:
     def replan(self, options: HierarchicalRouteOptions) -> None:
         """Replan all non-evacuated agents from their exact current positions."""
         self.options = options
+        self._historical_max_queue = max(
+            self._historical_max_queue,
+            max((gate.max_queue for gate in self._gates.values()), default=0),
+        )
         self._gates.clear()
         self._projected_gate_loads.clear()
 
@@ -231,6 +235,7 @@ class EvacuationSimulator:
         clearance = None
         if states and len(evacuated) + len(trapped) == len(states) and not active:
             clearance = max(times) if times else self.elapsed_s
+        current_max_queue = max((gate.max_queue for gate in self._gates.values()), default=0)
         return EvacuationStats(
             elapsed_s=self.elapsed_s,
             total_agents=len(states),
@@ -240,7 +245,7 @@ class EvacuationSimulator:
             trapped_agents=len(trapped),
             average_evacuation_time_s=(sum(times) / len(times)) if times else None,
             clearance_time_s=clearance,
-            max_queue=max((gate.max_queue for gate in self._gates.values()), default=0),
+            max_queue=max(self._historical_max_queue, current_max_queue),
             exit_usage=dict(sorted(self._exit_usage.items())),
         )
 
@@ -364,12 +369,25 @@ def spawn_agents(
     max_speed_mps: float = 1.4,
     seed: int = 42,
     config: EvacuationConfig | None = None,
+    egress_reachable_only: bool = True,
 ) -> list[EvacuationAgentSpec]:
-    """Create deterministic occupant starts on walkable CDT cells."""
+    """Create deterministic synthetic occupants on walkable CDT cells.
+
+    Automatic/demo populations default to spaces that have a baseline route to a
+    classified exit. IFC navigation models can legitimately contain roofs,
+    exterior terraces, service voids or other walkable semantic spaces that are
+    not sensible random occupant origins. Explicitly supplied agent specs are not
+    filtered, so a genuine unreachable occupied room is still reported as
+    ``trapped`` by :class:`EvacuationSimulator`.
+    """
     config = config or EvacuationConfig()
     cells = [cell for cell in model.cells if cell.space_id]
+    if egress_reachable_only:
+        eligible_spaces = baseline_egress_space_ids(model)
+        cells = [cell for cell in cells if cell.space_id in eligible_spaces]
     if not cells or count <= 0:
         return []
+
     rng = random.Random(int(seed))
     lo = min(float(min_speed_mps), float(max_speed_mps))
     hi = max(float(min_speed_mps), float(max_speed_mps))
@@ -391,6 +409,35 @@ def spawn_agents(
         speed = lo if abs(hi - lo) <= _EPSILON else rng.uniform(lo, hi)
         agents.append(EvacuationAgentSpec(f"agent:{index + 1:03d}", chosen, speed))
     return agents
+
+
+def baseline_egress_space_ids(model: InavModel) -> set[str]:
+    """Return semantic spaces with a route to at least one baseline exit.
+
+    One representative point per space is sufficient because qualified CDT
+    spaces are internally connected (``split_spaces == 0`` is part of the real
+    IFC regression). The function deliberately ignores runtime blocked/hazard
+    state: it answers whether a space is a sensible *baseline* automatic
+    population origin, not whether a later emergency scenario leaves it safe.
+    """
+    exits = [portal for portal in model.portals if portal.is_exit]
+    if not exits:
+        return set()
+
+    cells_by_space: dict[str, list[NavCell]] = {}
+    for cell in model.cells:
+        if cell.space_id:
+            cells_by_space.setdefault(cell.space_id, []).append(cell)
+
+    reachable: set[str] = set()
+    for space_id in sorted(cells_by_space):
+        cells = sorted(cells_by_space[space_id], key=lambda item: item.id)
+        representative = _triangle_centroid(cells[0])
+        for exit_portal in exits:
+            if find_hierarchical_path(model, representative, exit_portal.position_m) is not None:
+                reachable.add(space_id)
+                break
+    return reachable
 
 
 def _build_plan(
