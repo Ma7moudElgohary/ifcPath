@@ -87,11 +87,32 @@ IFCPath response:
   - **metric movement graph/navmesh**: exact local movement geometry.
 - route profiles (public, wheelchair, firefighter, security, maintenance) should affect transfer availability and cost without regenerating IFC geometry.
 
-## 6. Obstacles and space subdivision
+## 6. IFC-Graph: semantics-first building connectivity
+
+Zhu et al., **Semantics-based connectivity graph for indoor pathfinding powered by IFC-Graph**, Automation in Construction 171 (2025), 106019. DOI: https://doi.org/10.1016/j.autcon.2025.106019
+
+This is especially relevant to the Digital Twin architecture because it separates **semantic building connectivity** from detailed metric path geometry. The paper constructs horizontal connectivity primarily from IFC semantics and relationships, including spaces, space boundaries and connecting elements, and uses geometry where needed for vertical links and visualisation. It demonstrates object-to-object queries such as space-to-space, space-to-exit and space-to-facility pathfinding.
+
+Important implications:
+
+- geometry-only graph generation can be unnecessarily expensive and semantically weak;
+- `IfcSpace` and `IfcRelSpaceBoundary*` should be first-class graph inputs, not only validation metadata;
+- doors and other connecting elements should become explicit semantic transitions;
+- vertical connectivity needs an explicit representation because ordinary IFC relationships are often insufficient to express storey-to-storey navigability;
+- graph semantics make it easier to attach operational information for Digital Twin scenarios.
+
+IFCPath response:
+
+- INAV will expose an explicit semantic connectivity layer in addition to the metric floor graph;
+- horizontal semantic transitions are derived from IFC space-boundary relationships when available, with geometry-based inference only as fallback;
+- vertical transitions will be modeled explicitly for stairs, ramps, elevators and escalators instead of being left as accidental proximity edges;
+- target software such as Unreal can perform hierarchical routing: semantic building route first, local metric route second.
+
+## 7. Obstacles and space subdivision
 
 Xu et al., **BIM-based indoor path planning considering obstacles**, ISPRS Annals IV-2/W4 (2017), 417-423. DOI: https://doi.org/10.5194/isprs-annals-IV-2-W4-417-2017
 
-The work shows why furniture/fixed obstacles cannot be ignored in accurate indoor movement geometry and investigates both 2D subdivision and 3D triangular-prism subdivision.
+The work shows why furniture/fixed obstacles cannot be ignored in accurate indoor movement geometry and investigates both 2D and 3D space subdivision methods.
 
 IFCPath roadmap:
 
@@ -99,7 +120,7 @@ IFCPath roadmap:
 - keep movable furniture as optional scenario data rather than permanently burning it into every network;
 - support agent-clearance erosion of walkable polygons.
 
-## 7. IndoorGML / primal-dual model
+## 8. IndoorGML / primal-dual model
 
 OGC **IndoorGML 2.0 Part 1 – Conceptual Model** and IndoorGML 1.1: https://www.ogc.org/standards/indoorgml/
 
@@ -113,7 +134,7 @@ IndoorGML provides the cleanest standard conceptual model for IFCPath's portable
 
 IFCPath should remain JSON/engine-friendly rather than emitting GML internally, but INAV semantics should remain mappable to IndoorGML concepts.
 
-## 8. Dynamic Digital Twin routing
+## 9. Dynamic Digital Twin routing
 
 Rashidian & Malek, **An IFC-based framework for semantic integration of BIM and mobile crowd sensing in real-time evacuation routing**, Advanced Engineering Informatics 72 (2026), 104500. DOI: https://doi.org/10.1016/j.aei.2026.104500
 
@@ -137,26 +158,20 @@ IFC
  ↓
 IfcOpenShell semantics + world geometry
  ↓
-IfcSpace bottom polygon
- ↓
-make-valid / optional agent-clearance erosion
- ↓
-Constrained Delaunay Triangulation
- ↓
-triangle-dual local metric graph
- ↓
-IfcDoor semantic portals
- ↓
-stair / ramp / elevator transfer layer
- ↓
-IndoorGML-like semantic dual graph
- +
-metric movement graph
- ↓
-INAV
- ↓
-Unreal / other targets
+┌──────────────────────────────┬──────────────────────────────┐
+│ semantic connectivity       │ metric movement geometry      │
+│ IfcSpace / boundaries       │ IfcSpace bottom polygon       │
+│ doors / vertical transfers  │ make-valid / clearance        │
+│ space-to-space graph        │ constrained Delaunay          │
+└──────────────┬───────────────┴──────────────┬───────────────┘
+               └───────────────┬──────────────┘
+                               ↓
+                 hierarchical INAV navigation model
+                               ↓
+                     Unreal / other targets
 ```
+
+The semantic graph answers **which spaces/transfers must be traversed**. The metric graph answers **the exact local movement geometry inside each traversed space**.
 
 ## Accuracy gates
 
