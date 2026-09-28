@@ -31,7 +31,7 @@ def test_single_space_is_fallback_exit_when_external_property_missing():
 def test_two_space_door_without_external_property_is_not_exit():
     result = classify_door_exit(2, {})
     assert not result.is_exit
-    assert result.exit_source if False else True
+    assert result.is_external is None
     assert result.source == "not-classified"
 
 
