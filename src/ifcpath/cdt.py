@@ -13,27 +13,14 @@ from .geometry import Vec3, distance, triangle_normal
 Edge = tuple[int, int, float]
 
 
-def build_space_cdt_graph(
+def prepare_space_floor(
     vertices: list[Vec3],
     triangles: list[tuple[int, int, int]],
     *,
     floor_tolerance_m: float = 0.12,
     max_slope_deg: float = 12.0,
     clearance_m: float = 0.0,
-) -> tuple[list[Vec3], list[Edge]]:
-    """Build a sparse metric graph from an IFC space floor using CDT.
-
-    The space's bottom horizontal triangles are unioned into a 2D walkable
-    polygon. Optional negative buffering applies pedestrian clearance. A
-    constrained Delaunay triangulation then preserves the polygon boundaries.
-    The navigation graph is the dual of that triangulation: one node at each
-    triangle centroid and one edge between centroids of triangles sharing an
-    edge.
-
-    This follows the BIM indoor-navigation literature that derives floor-level
-    networks from polygonal space boundaries and constrained triangulation,
-    while keeping IFC semantic portals as the transitions between spaces.
-    """
+):
     floor = space_floor_polygon(
         vertices,
         triangles,
@@ -41,13 +28,19 @@ def build_space_cdt_graph(
         max_slope_deg=max_slope_deg,
     )
     if floor is None or floor.is_empty:
-        return [], []
-
+        return None
     if clearance_m > 0.0:
         floor = shapely.buffer(floor, -clearance_m, join_style="mitre")
         floor = shapely.make_valid(floor)
         if floor.is_empty:
-            return [], []
+            return None
+    return floor
+
+
+def build_floor_cdt_graph(floor, z: float) -> tuple[list[Vec3], list[Edge]]:
+    """Build the triangle-dual metric graph for a prepared walkable polygon."""
+    if floor is None or floor.is_empty:
+        return [], []
 
     triangulation = shapely.constrained_delaunay_triangles(floor)
     triangle_polygons = [
@@ -58,7 +51,6 @@ def build_space_cdt_graph(
     if not triangle_polygons:
         return [], []
 
-    z = _floor_elevation(vertices)
     points: list[Vec3] = []
     edge_owners: dict[tuple[tuple[int, int], tuple[int, int]], list[int]] = defaultdict(list)
     quantization = 1_000_000_000.0
@@ -80,13 +72,30 @@ def build_space_cdt_graph(
             continue
         a, b = owners
         segment = LineString([(points[a][0], points[a][1]), (points[b][0], points[b][1])])
-        # Centroids of adjacent CDT triangles should stay within their union;
-        # retain this predicate as a defensive geometry validity gate.
         if not floor.covers(segment):
             continue
         edges.append((a, b, distance(points[a], points[b])))
 
     return points, edges
+
+
+def build_space_cdt_graph(
+    vertices: list[Vec3],
+    triangles: list[tuple[int, int, int]],
+    *,
+    floor_tolerance_m: float = 0.12,
+    max_slope_deg: float = 12.0,
+    clearance_m: float = 0.0,
+) -> tuple[list[Vec3], list[Edge]]:
+    """Build a sparse metric graph from an IFC space floor using CDT."""
+    floor = prepare_space_floor(
+        vertices,
+        triangles,
+        floor_tolerance_m=floor_tolerance_m,
+        max_slope_deg=max_slope_deg,
+        clearance_m=clearance_m,
+    )
+    return build_floor_cdt_graph(floor, _floor_elevation(vertices))
 
 
 def space_floor_polygon(
@@ -119,6 +128,10 @@ def space_floor_polygon(
 
     merged = unary_union(polygons)
     return shapely.make_valid(merged)
+
+
+def floor_elevation(vertices: list[Vec3]) -> float:
+    return _floor_elevation(vertices)
 
 
 def _floor_elevation(vertices: list[Vec3]) -> float:
