@@ -72,23 +72,30 @@ def _sample_triangles(
     spacing_m: float,
     max_points: int,
 ) -> list[Vec3]:
-    """Sample triangles with a maximum grid step controlled by edge length.
+    """Sample triangle interiors economically while keeping mesh edges connected.
 
-    Using ``sqrt(area)`` to choose subdivisions undersamples long, skinny IFC
-    triangles: a ten-metre triangle only a few centimetres wide can have a tiny
-    area and therefore receive just its corner samples. Basing subdivisions on
-    the longest edge keeps neighbouring samples within the requested spacing
-    regardless of triangle aspect ratio.
-
-    Shared triangle boundaries generate the same barycentric samples repeatedly,
-    so exact/near-exact duplicates are collapsed to keep the navigation graph
-    compact and to prevent duplicate samples from consuming nearest-neighbour
-    slots.
+    Area-based barycentric sampling gives a useful interior density but can miss
+    long, skinny IFC triangles. Instead of subdividing the *entire* skinny
+    triangle by its longest edge (which creates an O(n^2) point explosion), we
+    keep the area-based interior grid and separately sample each triangle edge
+    at the requested spacing. Shared-edge samples are deduplicated.
     """
     points: list[Vec3] = []
     seen: set[tuple[int, int, int]] = set()
     spacing = max(spacing_m, 1e-3)
     quantization = 1_000_000_000.0
+
+    def add_point(point: Vec3) -> bool:
+        key = (
+            round(point[0] * quantization),
+            round(point[1] * quantization),
+            round(point[2] * quantization),
+        )
+        if key in seen:
+            return False
+        seen.add(key)
+        points.append(point)
+        return len(points) >= max_points
 
     for a, b, c in triangles:
         area2 = math.dist((0, 0, 0), (
@@ -100,8 +107,22 @@ def _sample_triangles(
         if area <= 1e-10:
             continue
 
-        longest_edge = max(distance(a, b), distance(b, c), distance(c, a))
-        divisions = max(1, int(math.ceil(longest_edge / spacing)))
+        # Guarantee connectivity along triangulation boundaries even for highly
+        # elongated faces.
+        for edge_start, edge_end in ((a, b), (b, c), (c, a)):
+            edge_divisions = max(1, int(math.ceil(distance(edge_start, edge_end) / spacing)))
+            for k in range(edge_divisions + 1):
+                t = k / edge_divisions
+                point = (
+                    edge_start[0] + (edge_end[0] - edge_start[0]) * t,
+                    edge_start[1] + (edge_end[1] - edge_start[1]) * t,
+                    edge_start[2] + (edge_end[2] - edge_start[2]) * t,
+                )
+                if add_point(point):
+                    return points
+
+        # Interior density remains proportional to area rather than aspect ratio.
+        divisions = max(1, int(math.ceil(math.sqrt(area) / spacing)))
         for i in range(divisions + 1):
             for j in range(divisions + 1 - i):
                 u, v = i / divisions, j / divisions
@@ -111,16 +132,7 @@ def _sample_triangles(
                     u*a[1] + v*b[1] + w*c[1],
                     u*a[2] + v*b[2] + w*c[2],
                 )
-                key = (
-                    round(point[0] * quantization),
-                    round(point[1] * quantization),
-                    round(point[2] * quantization),
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
-                points.append(point)
-                if len(points) >= max_points:
+                if add_point(point):
                     return points
     return points
 
