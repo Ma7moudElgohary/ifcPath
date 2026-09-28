@@ -29,6 +29,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     level_by_entity = {x[0]: x[1] for x in _contained_levels(model, levels)}
 
     space_boxes: list[tuple[Space, tuple[float, float, float, float, float, float]]] = []
+    space_by_entity_id: dict[int, Space] = {}
     for entity in model.by_type("IfcSpace"):
         bbox = _bbox(entity)
         if bbox is None:
@@ -37,23 +38,35 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         centroid = ((bbox[0]+bbox[3])*0.5, (bbox[1]+bbox[4])*0.5, (bbox[2]+bbox[5])*0.5)
         space = Space(
             id=f"space:{entity.GlobalId}",
-            name=entity.Name or entity.LongName or entity.GlobalId,
+            name=entity.Name or getattr(entity, "LongName", None) or entity.GlobalId,
             level_id=level_id,
             centroid_m=centroid,
             ifc_guid=entity.GlobalId,
         )
         out.spaces.append(space)
         space_boxes.append((space, bbox))
+        space_by_entity_id[entity.id()] = space
+
+    boundary_spaces = _boundary_space_map(model, space_by_entity_id)
 
     points: list[tuple[float, float, float]] = []
     point_kinds: list[str] = []
-    for ifc_type, spacing, kind in (
-        ("IfcSlab", options.floor_spacing_m, "walk"),
-        ("IfcRamp", options.floor_spacing_m, "ramp"),
-        ("IfcStair", options.stair_spacing_m, "stair"),
-        ("IfcStairFlight", options.stair_spacing_m, "stair"),
+    point_levels: list[str | None] = []
+
+    floor_entities = [
+        e for e in model.by_type("IfcSlab")
+        if str(getattr(e, "PredefinedType", "")).upper() not in {"ROOF"}
+    ]
+    ramp_entities = list(model.by_type("IfcRamp")) + list(model.by_type("IfcRampFlight"))
+    stair_flights = list(model.by_type("IfcStairFlight"))
+    stair_entities = stair_flights if stair_flights else list(model.by_type("IfcStair"))
+
+    for entities, spacing, kind in (
+        (floor_entities, options.floor_spacing_m, "walk"),
+        (ramp_entities, options.floor_spacing_m, "ramp"),
+        (stair_entities, options.stair_spacing_m, "stair"),
     ):
-        for entity in model.by_type(ifc_type):
+        for entity in entities:
             mesh = _mesh(entity)
             if mesh is None:
                 continue
@@ -61,44 +74,85 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             sampled = sample_walkable_triangles(verts, tris, spacing, options.max_slope_deg)
             points.extend(sampled)
             point_kinds.extend([kind] * len(sampled))
+            point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
 
-    out.nodes = [
-        NavNode(id=f"n:{i}", position_m=p, kind=point_kinds[i] if i < len(point_kinds) else "walk")
-        for i, p in enumerate(points)
-    ]
+    out.nodes = []
+    for i, p in enumerate(points):
+        out.nodes.append(NavNode(
+            id=f"n:{i}",
+            position_m=p,
+            kind=point_kinds[i] if i < len(point_kinds) else "walk",
+            level_id=point_levels[i] if i < len(point_levels) else None,
+            space_id=_space_at_point(p, space_boxes),
+        ))
+
     for i, j, d in build_radius_edges(points, options.connect_distance_m):
         out.edges.append(NavEdge(a=f"n:{i}", b=f"n:{j}", distance_m=d, kind="walk"))
+
+    explicit_portal_count = 0
+    inferred_portal_count = 0
 
     for door in model.by_type("IfcDoor"):
         bbox = _bbox(door)
         if bbox is None:
             continue
         p = ((bbox[0]+bbox[3])*0.5, (bbox[1]+bbox[4])*0.5, bbox[2])
-        candidates = sorted(
-            (( _distance_to_box(p, sb), s) for s, sb in space_boxes),
-            key=lambda x: x[0],
-        )
-        close = [s for d, s in candidates if d <= 1.5][:2]
-        from_space = close[0].id if close else None
-        to_space = close[1].id if len(close) > 1 else None
+
+        related_element_ids = {door.id()}
+        for fills_rel in getattr(door, "FillsVoids", ()) or ():
+            opening = getattr(fills_rel, "RelatingOpeningElement", None)
+            if opening is not None:
+                related_element_ids.add(opening.id())
+
+        explicit_spaces: list[Space] = []
+        seen_space_ids: set[str] = set()
+        for element_id in related_element_ids:
+            for space in boundary_spaces.get(element_id, ()):
+                if space.id not in seen_space_ids:
+                    explicit_spaces.append(space)
+                    seen_space_ids.add(space.id)
+
+        if explicit_spaces:
+            connected_spaces = explicit_spaces[:2]
+            explicit_portal_count += 1
+        else:
+            candidates = sorted(
+                ((_distance_to_box(p, sb), s) for s, sb in space_boxes),
+                key=lambda x: x[0],
+            )
+            connected_spaces = [s for d, s in candidates if d <= 1.5][:2]
+            inferred_portal_count += 1
+
+        from_space = connected_spaces[0].id if connected_spaces else None
+        to_space = connected_spaces[1].id if len(connected_spaces) > 1 else None
         portal_id = f"door:{door.GlobalId}"
+        level_id = level_by_entity.get(door.id())
+
         portal = Portal(
             id=portal_id,
             kind="door",
             position_m=p,
             from_space_id=from_space,
             to_space_id=to_space,
-            level_id=level_by_entity.get(door.id()),
+            level_id=level_id,
             width_m=float(getattr(door, "OverallWidth", 0.0) or 0.0) or None,
             ifc_guid=door.GlobalId,
-            is_exit=(len(close) == 1),
+            is_exit=(len(connected_spaces) == 1),
         )
         out.portals.append(portal)
 
         node_id = f"p:{door.GlobalId}"
-        out.nodes.append(NavNode(id=node_id, position_m=p, kind="portal", portal_id=portal_id))
+        out.nodes.append(NavNode(
+            id=node_id,
+            position_m=p,
+            kind="portal",
+            level_id=level_id,
+            space_id=from_space,
+            portal_id=portal_id,
+        ))
+
         nearest = sorted(
-            (( _dist(p, n.position_m), n) for n in out.nodes if n.id.startswith("n:")),
+            ((_dist(p, n.position_m), n) for n in out.nodes if n.id.startswith("n:")),
             key=lambda x: x[0],
         )
         for d, n in nearest[:6]:
@@ -110,6 +164,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "edge_count": len(out.edges),
         "space_count": len(out.spaces),
         "portal_count": len(out.portals),
+        "explicit_space_boundary_portals": explicit_portal_count,
+        "geometry_inferred_portals": inferred_portal_count,
         "generator": "ifcpath",
     })
     return out
@@ -135,6 +191,44 @@ def _contained_levels(model, levels: list[Level]):
         level_id = by_guid.get(structure.GlobalId)
         for element in rel.RelatedElements:
             yield element.id(), level_id
+
+
+def _boundary_space_map(model, space_by_entity_id: dict[int, Space]) -> dict[int, list[Space]]:
+    """Map boundary-related IFC elements/openings to their relating spaces.
+
+    IFC models that carry IfcRelSpaceBoundary data get semantic connectivity first;
+    geometry is only the fallback for less complete authoring exports.
+    """
+    result: dict[int, list[Space]] = {}
+    for relation_type in ("IfcRelSpaceBoundary", "IfcRelSpaceBoundary1stLevel", "IfcRelSpaceBoundary2ndLevel"):
+        try:
+            relations = model.by_type(relation_type)
+        except Exception:
+            continue
+        for rel in relations:
+            space_entity = getattr(rel, "RelatingSpace", None)
+            element = getattr(rel, "RelatedBuildingElement", None)
+            if space_entity is None or element is None:
+                continue
+            space = space_by_entity_id.get(space_entity.id())
+            if space is None:
+                continue
+            bucket = result.setdefault(element.id(), [])
+            if all(existing.id != space.id for existing in bucket):
+                bucket.append(space)
+    return result
+
+
+def _space_at_point(point, space_boxes, tolerance_m: float = 0.15) -> str | None:
+    x, y, z = point
+    for space, box in space_boxes:
+        if (
+            box[0]-tolerance_m <= x <= box[3]+tolerance_m
+            and box[1]-tolerance_m <= y <= box[4]+tolerance_m
+            and box[2]-tolerance_m <= z <= box[5]+tolerance_m
+        ):
+            return space.id
+    return None
 
 
 def _settings():
