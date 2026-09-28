@@ -15,13 +15,17 @@ def main() -> None:
 
     report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     stats = report.get("stats", {})
+    nodes = report.get("node_count", 0)
+    edges = report.get("edge_count", 0)
 
     if not report.get("valid", False):
         fail("validator reported errors")
-    if report.get("node_count", 0) < 50:
-        fail(f"too few navigation nodes: {report.get('node_count', 0)}")
-    if report.get("edge_count", 0) < 40:
-        fail(f"too few navigation edges: {report.get('edge_count', 0)}")
+    if nodes < 50:
+        fail(f"too few navigation nodes: {nodes}")
+    if edges < 40:
+        fail(f"too few navigation edges: {edges}")
+    if edges > nodes * 12:
+        fail(f"navigation graph is too dense: {edges} edges for {nodes} nodes")
     if stats.get("levels", 0) < 2:
         fail(f"expected a multi-level building, got {stats.get('levels', 0)} levels")
     if stats.get("spaces", 0) < 5:
@@ -33,7 +37,7 @@ def main() -> None:
 
     print("reference IFC qualification passed")
     print(
-        f"nodes={report['node_count']} edges={report['edge_count']} "
+        f"nodes={nodes} edges={edges} edge_ratio={edges / max(nodes, 1):.2f} "
         f"levels={stats.get('levels')} spaces={stats.get('spaces')} "
         f"portals={stats.get('portals')} components={report.get('component_count')} "
         f"largest_component={report.get('reachable_node_ratio', 0.0):.1%}"
