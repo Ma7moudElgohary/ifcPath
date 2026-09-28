@@ -26,6 +26,31 @@ struct FIFCPathNode
 
     UPROPERTY(BlueprintReadOnly)
     FString PortalId;
+
+    UPROPERTY(BlueprintReadOnly)
+    FString CellId;
+};
+
+USTRUCT(BlueprintType)
+struct FIFCPathCell
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly)
+    FString Id;
+
+    // Exactly three vertices in Unreal centimetres.
+    UPROPERTY(BlueprintReadOnly)
+    TArray<FVector> Vertices;
+
+    UPROPERTY(BlueprintReadOnly)
+    FString SpaceId;
+
+    UPROPERTY(BlueprintReadOnly)
+    FString LevelId;
+
+    UPROPERTY(BlueprintReadOnly)
+    TArray<FString> NeighborIds;
 };
 
 USTRUCT()
@@ -70,6 +95,16 @@ public:
         FString& OutStartNodeId,
         FString& OutGoalNodeId) const;
 
+    // Accurate local routing inside one CDT-backed IFC space. The triangle
+    // corridor is shortened with the funnel/string-pulling algorithm instead
+    // of returning the legacy centroid graph zig-zag.
+    UFUNCTION(BlueprintCallable, Category="IFCPath|NavMesh")
+    bool FindNavMeshPathFromWorldPositions(
+        const FVector& StartWorldPosition,
+        const FVector& GoalWorldPosition,
+        TArray<FVector>& OutPoints,
+        FString& OutSpaceId) const;
+
     UFUNCTION(BlueprintCallable, Category="IFCPath|Dynamic State")
     void SetPortalBlocked(const FString& PortalId, bool bBlocked);
 
@@ -94,21 +129,53 @@ public:
     UFUNCTION(BlueprintCallable, Category="IFCPath|Debug")
     void DrawDebugGraph(FLinearColor Color, float Thickness = 1.5f, float Duration = 10.0f) const;
 
+    UFUNCTION(BlueprintCallable, Category="IFCPath|Debug")
+    void DrawDebugNavMesh(FLinearColor Color, float Thickness = 1.0f, float Duration = 10.0f) const;
+
     UFUNCTION(BlueprintPure, Category="IFCPath")
     int32 GetNodeCount() const { return Nodes.Num(); }
 
     UFUNCTION(BlueprintPure, Category="IFCPath")
     int32 GetEdgeCount() const { return Edges.Num(); }
 
+    UFUNCTION(BlueprintPure, Category="IFCPath|NavMesh")
+    int32 GetCellCount() const { return Cells.Num(); }
+
 private:
     TMap<FString, FIFCPathNode> Nodes;
     TArray<FIFCPathEdge> Edges;
     TMap<FString, TArray<FIFCPathAdjacencyEntry>> Adjacency;
+    TMap<FString, FIFCPathCell> Cells;
 
     TSet<FString> BlockedPortals;
     TSet<FString> BlockedSpaces;
     TMap<FString, double> SpaceCostMultipliers;
 
     double GetTraversalMultiplier(const FIFCPathNode& A, const FIFCPathNode& B) const;
+
+    const FIFCPathCell* FindCellAtWorldPosition(const FVector& WorldPosition) const;
+    bool FindCellCorridor(
+        const FString& StartCellId,
+        const FString& GoalCellId,
+        const FString& SpaceId,
+        TArray<FString>& OutCellIds) const;
+    bool GetSharedCellEdge(
+        const FIFCPathCell& A,
+        const FIFCPathCell& B,
+        FVector& OutA,
+        FVector& OutB) const;
+    static TPair<FVector, FVector> OrientPortal(
+        const FIFCPathCell& Current,
+        const FIFCPathCell& Next,
+        const FVector& A,
+        const FVector& B);
+    static void StringPull(
+        const TArray<TPair<FVector, FVector>>& Portals,
+        TArray<FVector>& OutPoints);
+    static bool PointInCell2D(const FVector& Point, const FIFCPathCell& Cell);
+    static FVector CellCentroid(const FIFCPathCell& Cell);
+    static double SignedArea2D(const FVector& A, const FVector& B, const FVector& C);
+    static bool NearlyEqual2D(const FVector& A, const FVector& B, double ToleranceCm = 0.01);
+
     static FVector ToUnrealPosition(double X, double Y, double Z);
 };
