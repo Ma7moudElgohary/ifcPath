@@ -33,6 +33,8 @@ class Portal:
     width_m: float | None = None
     ifc_guid: str | None = None
     is_exit: bool = False
+    is_external: bool | None = None
+    exit_source: str | None = None
 
 
 @dataclass(slots=True)
