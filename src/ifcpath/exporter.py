@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .model import InavModel, Level, NavEdge, NavNode, Portal, Space
+from .model import InavModel, Level, NavEdge, NavNode, Portal, SemanticTransition, Space
 
 
 def save_inav(model: InavModel, path: str | Path) -> Path:
@@ -23,6 +23,7 @@ def load_inav(path: str | Path) -> InavModel:
         levels=[Level(**x) for x in raw.get("levels", [])],
         spaces=[Space(**_tuple_vec(x, "centroid_m")) for x in raw.get("spaces", [])],
         portals=[Portal(**_tuple_vec(x, "position_m")) for x in raw.get("portals", [])],
+        transitions=[SemanticTransition(**x) for x in raw.get("transitions", [])],
         nodes=[NavNode(**_tuple_vec(x, "position_m")) for x in raw.get("nodes", [])],
         edges=[NavEdge(**x) for x in raw.get("edges", [])],
         metadata=raw.get("metadata", {}),
