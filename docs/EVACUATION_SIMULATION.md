@@ -41,11 +41,15 @@ The population speed range is configurable. The simulator applies additional con
 
 The default stair speed factor is `0.75`. This is a modeling parameter, not a universal constant, and should be calibrated for a real safety study.
 
-## Deterministic population
+## Deterministic automatic population
 
 The Builder generates occupant positions inside walkable CDT triangles using a deterministic random seed. A minimum spawn spacing is attempted to avoid identical starts. Reusing the same model, population settings and seed produces the same population.
 
-This makes scenario A/B comparisons reproducible.
+Automatic/demo populations are sampled only from semantic spaces that have a **baseline route to at least one classified exit**. This matters because IFC navigation models can legitimately contain roof areas, terraces, service voids or other walkable geometry that should not receive arbitrary synthetic occupants.
+
+This filter does **not** hide real egress failures. Explicitly supplied occupants are never filtered: if a person is placed in a genuinely unreachable occupied space, the simulator reports that person as `trapped`. The automatic filter can also be disabled in code with `egress_reachable_only=False` for diagnostic populations.
+
+This makes scenario A/B comparisons reproducible without allowing incidental non-occupancy navigation regions to dominate the synthetic population.
 
 ## Live Digital Twin scenarios
 
@@ -59,7 +63,7 @@ The Builder reports:
 
 - elapsed simulation time;
 - total / evacuated / active / waiting / trapped occupants;
-- maximum observed bottleneck queue;
+- maximum observed bottleneck queue, retained across live replans;
 - average evacuation time;
 - final clearance time;
 - exit usage counts.
@@ -81,4 +85,4 @@ It does not yet model shoulder-to-shoulder avoidance, pushing, body compression,
 
 ## Real IFC qualification
 
-GitHub Actions builds the buildingSMART Duplex IFC, validates the INAV model, then creates 24 deterministic occupants and runs a crowd evacuation regression. The qualification records evacuation counts, clearance metrics, queues and exit usage and fails if the real-model population cannot evacuate at an acceptable rate.
+GitHub Actions builds the buildingSMART Duplex IFC, validates the INAV model, then creates 24 deterministic occupants in baseline egress-reachable spaces and runs a crowd evacuation regression. The qualification records evacuation counts, clearance metrics, queues and exit usage and fails if the real-model population cannot evacuate at an acceptable rate.
