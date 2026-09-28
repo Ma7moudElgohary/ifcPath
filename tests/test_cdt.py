@@ -32,6 +32,21 @@ def test_cdt_graph_respects_concave_space_boundary():
         assert floor.covers(line)
 
 
+def test_cdt_boundary_anchors_put_nodes_near_long_wall_doors():
+    vertices = [
+        (0.0, 0.0, 0.0),
+        (10.0, 0.0, 0.0),
+        (10.0, 4.0, 0.0),
+        (0.0, 4.0, 0.0),
+    ]
+    triangles = [(0, 1, 2), (0, 2, 3)]
+
+    points, _ = build_space_cdt_graph(vertices, triangles, boundary_spacing_m=1.0)
+    door = (5.0, 0.0, 0.0)
+    nearest = min(((p[0] - door[0]) ** 2 + (p[1] - door[1]) ** 2) ** 0.5 for p in points)
+    assert nearest <= 0.5 + 1e-9
+
+
 def test_cdt_clearance_can_remove_too_narrow_space():
     vertices = [
         (0.0, 0.0, 0.0),
