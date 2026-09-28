@@ -2,6 +2,7 @@
 
 #include "Algo/Reverse.h"
 #include "Dom/JsonObject.h"
+#include "DrawDebugHelpers.h"
 #include "Misc/FileHelper.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -182,6 +183,62 @@ bool UIFCPathSubsystem::FindPath(const FString& StartNodeId, const FString& Goal
     return OutPoints.Num() > 0;
 }
 
+bool UIFCPathSubsystem::FindNearestNode(
+    const FVector& WorldPosition,
+    float MaxDistanceCm,
+    FString& OutNodeId,
+    FVector& OutNodePosition) const
+{
+    OutNodeId.Reset();
+    OutNodePosition = FVector::ZeroVector;
+
+    const double MaxDistanceSquared = MaxDistanceCm > 0.0f
+        ? FMath::Square(static_cast<double>(MaxDistanceCm))
+        : TNumericLimits<double>::Max();
+
+    double BestDistanceSquared = MaxDistanceSquared;
+    const FIFCPathNode* BestNode = nullptr;
+    for (const TPair<FString, FIFCPathNode>& Pair : Nodes)
+    {
+        const double DistanceSquared = FVector::DistSquared(WorldPosition, Pair.Value.Position);
+        if (DistanceSquared <= BestDistanceSquared)
+        {
+            BestDistanceSquared = DistanceSquared;
+            BestNode = &Pair.Value;
+        }
+    }
+
+    if (BestNode == nullptr)
+    {
+        return false;
+    }
+
+    OutNodeId = BestNode->Id;
+    OutNodePosition = BestNode->Position;
+    return true;
+}
+
+bool UIFCPathSubsystem::FindPathFromWorldPositions(
+    const FVector& StartWorldPosition,
+    const FVector& GoalWorldPosition,
+    float MaxSnapDistanceCm,
+    TArray<FVector>& OutPoints,
+    FString& OutStartNodeId,
+    FString& OutGoalNodeId) const
+{
+    FVector SnappedStart;
+    FVector SnappedGoal;
+    if (!FindNearestNode(StartWorldPosition, MaxSnapDistanceCm, OutStartNodeId, SnappedStart))
+    {
+        return false;
+    }
+    if (!FindNearestNode(GoalWorldPosition, MaxSnapDistanceCm, OutGoalNodeId, SnappedGoal))
+    {
+        return false;
+    }
+    return FindPath(OutStartNodeId, OutGoalNodeId, OutPoints);
+}
+
 void UIFCPathSubsystem::SetPortalBlocked(const FString& PortalId, bool bBlocked)
 {
     if (bBlocked)
@@ -191,6 +248,48 @@ void UIFCPathSubsystem::SetPortalBlocked(const FString& PortalId, bool bBlocked)
     else
     {
         BlockedPortals.Remove(PortalId);
+    }
+}
+
+void UIFCPathSubsystem::DrawDebugPath(
+    const TArray<FVector>& Points,
+    FLinearColor Color,
+    float Thickness,
+    float Duration) const
+{
+    UWorld* World = GetWorld();
+    if (World == nullptr || Points.Num() < 2)
+    {
+        return;
+    }
+
+    const FColor DrawColor = Color.ToFColor(true);
+    for (int32 Index = 1; Index < Points.Num(); ++Index)
+    {
+        DrawDebugLine(World, Points[Index - 1], Points[Index], DrawColor, false, Duration, 0, Thickness);
+    }
+}
+
+void UIFCPathSubsystem::DrawDebugGraph(FLinearColor Color, float Thickness, float Duration) const
+{
+    UWorld* World = GetWorld();
+    if (World == nullptr)
+    {
+        return;
+    }
+
+    const FColor DrawColor = Color.ToFColor(true);
+    for (const FIFCPathEdge& Edge : Edges)
+    {
+        const FIFCPathNode* A = Nodes.Find(Edge.A);
+        const FIFCPathNode* B = Nodes.Find(Edge.B);
+        if (A == nullptr || B == nullptr)
+        {
+            continue;
+        }
+        const bool bBlocked = !Edge.PortalId.IsEmpty() && BlockedPortals.Contains(Edge.PortalId);
+        const FColor EdgeColor = bBlocked ? FColor::Red : DrawColor;
+        DrawDebugLine(World, A->Position, B->Position, EdgeColor, false, Duration, 0, Thickness);
     }
 }
 
