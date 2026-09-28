@@ -46,6 +46,7 @@ def ensure_semantic_transitions(model: InavModel) -> list[SemanticTransition]:
             to_level_id=to_space.level_id if to_space else None,
             bidirectional=True,
             source="portal",
+            resource_id=portal.id,
         ))
         existing_portals.add(portal.id)
 
@@ -109,8 +110,12 @@ def _ensure_vertical_transitions(model: InavModel) -> None:
         )
 
         # A connector serving multiple storeys creates transitions only between
-        # adjacent served levels. Routing can chain them for longer travel.
+        # adjacent served levels. Routing can chain them for longer travel. All
+        # adjacent edges retain one physical resource ID so runtime systems can
+        # model a shared elevator car / stair / ramp resource instead of creating
+        # an independent resource per floor-to-floor edge.
         representative = min(component)
+        resource_id = f"vertical:{kind}:{representative}"
         for lower_level, upper_level in zip(ordered_levels, ordered_levels[1:]):
             lower_space = landing_by_level[lower_level][1]
             upper_space = landing_by_level[upper_level][1]
@@ -132,6 +137,7 @@ def _ensure_vertical_transitions(model: InavModel) -> None:
                 to_level_id=upper_level,
                 bidirectional=True,
                 source="metric_vertical_touch",
+                resource_id=resource_id,
             ))
             existing_pairs.add(pair_key)
 
