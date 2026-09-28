@@ -4,6 +4,7 @@ from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 
 from .model import InavModel
+from .semantic import ensure_semantic_transitions
 
 
 @dataclass(slots=True)
@@ -30,6 +31,7 @@ class ValidationReport:
 
 
 def validate_model(model: InavModel) -> ValidationReport:
+    ensure_semantic_transitions(model)
     issues: list[ValidationIssue] = []
     node_ids = {node.id for node in model.nodes}
     node_by_id = {node.id: node for node in model.nodes}
@@ -77,6 +79,10 @@ def validate_model(model: InavModel) -> ValidationReport:
         ))
 
     known_portals = {portal.id for portal in model.portals}
+    portal_by_id = {portal.id: portal for portal in model.portals}
+    known_spaces = {space.id for space in model.spaces}
+    space_by_id = {space.id: space for space in model.spaces}
+
     for edge in model.edges:
         if edge.portal_id and edge.portal_id not in known_portals:
             issues.append(ValidationIssue(
@@ -84,6 +90,87 @@ def validate_model(model: InavModel) -> ValidationReport:
                 "UNKNOWN_PORTAL",
                 f"Edge references unknown portal {edge.portal_id}",
                 edge.portal_id,
+            ))
+
+    # Validate the semantic dual graph independently of metric geometry. This
+    # catches malformed object-to-object connectivity even when low-level nodes
+    # happen to remain connected by geometric edges.
+    semantic_transition_errors = 0
+    transition_ids: set[str] = set()
+    for transition in model.transitions:
+        if transition.id in transition_ids:
+            semantic_transition_errors += 1
+            issues.append(ValidationIssue(
+                "error", "DUPLICATE_TRANSITION", "Semantic transition ID is duplicated", transition.id
+            ))
+        transition_ids.add(transition.id)
+
+        if transition.from_space_id not in known_spaces:
+            semantic_transition_errors += 1
+            issues.append(ValidationIssue(
+                "error",
+                "TRANSITION_UNKNOWN_FROM_SPACE",
+                f"Transition references unknown from-space {transition.from_space_id}",
+                transition.id,
+            ))
+        if transition.to_space_id and transition.to_space_id not in known_spaces:
+            semantic_transition_errors += 1
+            issues.append(ValidationIssue(
+                "error",
+                "TRANSITION_UNKNOWN_TO_SPACE",
+                f"Transition references unknown to-space {transition.to_space_id}",
+                transition.id,
+            ))
+        if transition.portal_id and transition.portal_id not in known_portals:
+            semantic_transition_errors += 1
+            issues.append(ValidationIssue(
+                "error",
+                "TRANSITION_UNKNOWN_PORTAL",
+                f"Transition references unknown portal {transition.portal_id}",
+                transition.id,
+            ))
+            continue
+
+        if transition.portal_id:
+            portal = portal_by_id[transition.portal_id]
+            portal_sides = {x for x in (portal.from_space_id, portal.to_space_id) if x}
+            transition_sides = {x for x in (transition.from_space_id, transition.to_space_id) if x}
+            if portal_sides != transition_sides:
+                semantic_transition_errors += 1
+                issues.append(ValidationIssue(
+                    "error",
+                    "TRANSITION_PORTAL_MISMATCH",
+                    "Transition space sides do not match its portal",
+                    transition.id,
+                ))
+
+        from_space = space_by_id.get(transition.from_space_id)
+        to_space = space_by_id.get(transition.to_space_id) if transition.to_space_id else None
+        if (
+            from_space
+            and transition.from_level_id
+            and from_space.level_id
+            and transition.from_level_id != from_space.level_id
+        ):
+            semantic_transition_errors += 1
+            issues.append(ValidationIssue(
+                "error",
+                "TRANSITION_FROM_LEVEL_MISMATCH",
+                "Transition from-level does not match the from-space level",
+                transition.id,
+            ))
+        if (
+            to_space
+            and transition.to_level_id
+            and to_space.level_id
+            and transition.to_level_id != to_space.level_id
+        ):
+            semantic_transition_errors += 1
+            issues.append(ValidationIssue(
+                "error",
+                "TRANSITION_TO_LEVEL_MISMATCH",
+                "Transition to-level does not match the to-space level",
+                transition.id,
             ))
 
     exits = [portal for portal in model.portals if portal.is_exit]
@@ -97,9 +184,6 @@ def validate_model(model: InavModel) -> ValidationReport:
         if edge_count == 0 and not any(adjacency.get(node.id) for node in portal_nodes):
             issues.append(ValidationIssue("warning", "PORTAL_DISCONNECTED", "Portal is disconnected from navigation graph", portal.id))
 
-        # A semantic two-sided door must actually attach to nodes belonging to
-        # both spaces. This is a stronger topology invariant than global graph
-        # connectivity because buildings may contain independent wings/units.
         attached_spaces: set[str] = set()
         for portal_node in portal_nodes:
             for neighbour_id in adjacency.get(portal_node.id, ()):
@@ -189,6 +273,8 @@ def validate_model(model: InavModel) -> ValidationReport:
             "levels": len(model.levels),
             "spaces": len(model.spaces),
             "portals": len(model.portals),
+            "semantic_transitions": len(model.transitions),
+            "semantic_transition_errors": semantic_transition_errors,
             "exits": len(exits),
             "isolated_nodes": len(isolated_nodes),
             "split_spaces": split_spaces,
