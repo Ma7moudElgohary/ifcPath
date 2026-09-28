@@ -43,12 +43,17 @@ def main() -> None:
 
     if stats.total_agents != 24:
         raise SystemExit(f"expected 24 agents, got {stats.total_agents}")
-    if stats.evacuated_agents < 20:
+    if stats.evacuated_agents != stats.total_agents:
         raise SystemExit(
-            f"real IFC crowd qualification requires >=20/24 evacuated agents; got {stats.evacuated_agents}"
+            "real IFC crowd qualification requires complete evacuation; "
+            f"evacuated={stats.evacuated_agents}/{stats.total_agents}"
         )
+    if stats.trapped_agents:
+        raise SystemExit(f"real IFC crowd qualification has trapped agents: {stats.trapped_agents}")
     if stats.active_agents:
         raise SystemExit(f"simulation did not settle within 300 s; active={stats.active_agents}")
+    if stats.clearance_time_s is None or stats.clearance_time_s <= 0.0:
+        raise SystemExit("real IFC crowd qualification did not produce a valid clearance time")
     if not stats.exit_usage:
         raise SystemExit("no real IFC exit served any occupant")
 
