@@ -97,10 +97,39 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             wall_obstacles.append(obstacle)
 
     blocked_walk_edges = 0
+    semantic_cross_space_edges = 0
+    vertical_kinds = {"stair", "ramp"}
     for i, j, d in build_radius_edges(points, options.connect_distance_m):
-        if edge_crosses_obstacle(points[i], points[j], wall_obstacles):
+        a_node = out.nodes[i]
+        b_node = out.nodes[j]
+        is_vertical_transition = a_node.kind in vertical_kinds or b_node.kind in vertical_kinds
+
+        # BIM semantics are stronger than approximate wall geometry. Ordinary
+        # walk nodes assigned to different spaces may only cross via a portal.
+        if (
+            not is_vertical_transition
+            and a_node.space_id
+            and b_node.space_id
+            and a_node.space_id != b_node.space_id
+        ):
+            semantic_cross_space_edges += 1
+            continue
+
+        # Same-space edges are allowed even if conservative wall convex hulls
+        # overlap them. Wall geometry is a fallback for unassigned points.
+        needs_geometry_check = not (
+            a_node.space_id
+            and b_node.space_id
+            and a_node.space_id == b_node.space_id
+        )
+        if (
+            needs_geometry_check
+            and not is_vertical_transition
+            and edge_crosses_obstacle(points[i], points[j], wall_obstacles)
+        ):
             blocked_walk_edges += 1
             continue
+
         out.edges.append(NavEdge(a=f"n:{i}", b=f"n:{j}", distance_m=d, kind="walk"))
 
     explicit_portal_count = 0
@@ -165,15 +194,45 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             portal_id=portal_id,
         ))
 
-        # Portal edges intentionally bypass wall-obstacle filtering: doors are
-        # the sanctioned graph transitions through wall footprints.
-        nearest = sorted(
-            ((_dist(p, n.position_m), n) for n in out.nodes if n.id.startswith("n:")),
-            key=lambda x: x[0],
-        )
-        for d, n in nearest[:6]:
-            if d <= options.portal_connect_distance_m:
-                out.edges.append(NavEdge(a=node_id, b=n.id, distance_m=d, kind="portal", portal_id=portal_id))
+        # Attach each side of a semantic door to nearby nodes in that specific
+        # connected space. This prevents a portal from accidentally linking to
+        # six nodes on only one side of the wall.
+        connected_node_ids: set[str] = set()
+        for connected_space in connected_spaces:
+            nearest_in_space = sorted(
+                (
+                    (_dist(p, n.position_m), n)
+                    for n in out.nodes
+                    if n.id.startswith("n:") and n.space_id == connected_space.id
+                ),
+                key=lambda x: x[0],
+            )
+            for d, n in nearest_in_space[:3]:
+                if d <= options.portal_connect_distance_m and n.id not in connected_node_ids:
+                    out.edges.append(NavEdge(
+                        a=node_id,
+                        b=n.id,
+                        distance_m=d,
+                        kind="portal",
+                        portal_id=portal_id,
+                    ))
+                    connected_node_ids.add(n.id)
+
+        # Geometry fallback for incomplete IFC/space assignment.
+        if not connected_node_ids:
+            nearest = sorted(
+                ((_dist(p, n.position_m), n) for n in out.nodes if n.id.startswith("n:")),
+                key=lambda x: x[0],
+            )
+            for d, n in nearest[:6]:
+                if d <= options.portal_connect_distance_m:
+                    out.edges.append(NavEdge(
+                        a=node_id,
+                        b=n.id,
+                        distance_m=d,
+                        kind="portal",
+                        portal_id=portal_id,
+                    ))
 
     out.metadata.update({
         "node_count": len(out.nodes),
@@ -184,6 +243,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "geometry_inferred_portals": inferred_portal_count,
         "wall_obstacle_count": len(wall_obstacles),
         "blocked_walk_edges": blocked_walk_edges,
+        "semantic_cross_space_edges_removed": semantic_cross_space_edges,
         "generator": "ifcpath",
     })
     return out
