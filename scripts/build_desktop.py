@@ -19,6 +19,8 @@ def main() -> None:
         "IFCPathBuilder",
         "--paths",
         str(root / "src"),
+        "--collect-submodules",
+        "ifcpath",
         "--collect-all",
         "ifcopenshell",
         "--collect-all",

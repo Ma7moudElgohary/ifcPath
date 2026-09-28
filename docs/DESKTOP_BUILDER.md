@@ -1,6 +1,6 @@
 # IFCPath Builder Desktop
 
-The desktop Builder is a PySide6 application on top of the same engine used by the `ifcpath` CLI. It does not spawn the CLI as a subprocess; IFC generation, validation and export call the Python core directly.
+The desktop Builder is a PySide6 application on top of the same engine used by the `ifcpath` CLI. It does not spawn the CLI as a subprocess; IFC generation, validation, route QA and export call the Python core directly.
 
 ## Install and run
 
@@ -18,24 +18,63 @@ The Builder supports:
 - configurable fixed IFC obstacle classes;
 - floor/stair sampling and graph-connection parameters;
 - non-blocking Build & Validate processing;
-- level-filtered navigation preview;
+- projected 3D BIM context for IFC builds;
 - navmesh, graph, portal and exit overlays;
+- individual storeys or all-storey 3D display;
+- exact click-to-pick Start/Goal points on CDT cells;
+- hierarchical multi-space/multi-storey route calculation;
+- stitched 3D path display through doors, stairs and ramps;
 - validation diagnostics and summary metrics;
 - `.inav` export;
 - drag/drop for IFC and INAV files;
 - persisted generation settings.
 
-## Preview
+## 3D navigation preview
 
-The first Builder viewport is deliberately a lightweight engine-independent top-down navigation preview. It renders the actual generated INAV representation:
+The viewport remains engine-independent and Qt-native. It uses a small orthographic 3D camera instead of introducing another rendering engine into the desktop product.
 
-- CDT cells grouped by semantic space;
+For IFC builds, the worker extracts a **preview-only** bounded triangle soup from walls, slabs, columns, stairs, ramps and doors. The triangle count is capped to keep the Builder responsive. BIM preview geometry is never written into `.inav` and never participates in route semantics.
+
+The navigation overlay remains the source of truth:
+
+- CDT cells grouped by semantic `IfcSpace`;
 - metric graph edges;
 - semantic portals/doors;
 - classified exits;
-- individual storeys or all storeys.
+- route start/goal markers;
+- the stitched hierarchical route.
 
-This keeps the desktop application small and responsive. A full 3D BIM/IFC viewport can replace the preview widget later without changing generation, validation, export or the UI shell.
+Interaction:
+
+- **Right drag**: orbit the 3D view.
+- **Mouse wheel**: zoom.
+- **Double click**: fit content.
+- **3D orbit / Top view**: switch projection mode.
+- **Pick Start / Pick Goal**: click directly on a visible walkable CDT triangle.
+
+Picking is not nearest-node snapping. The clicked screen point is located inside the projected CDT triangle and converted back to a world-space XYZ point with barycentric interpolation. That exact point is sent to `find_hierarchical_path()`.
+
+After both endpoints are selected, the Builder calculates and displays the same hierarchical route used by the Python reference engine:
+
+```text
+clicked start XYZ
+    ↓
+local CDT + funnel route
+    ↓
+door / stair / ramp transfer
+    ↓
+next semantic space
+    ↓
+local CDT + funnel route
+    ↓
+...
+    ↓
+clicked goal XYZ
+```
+
+The route panel reports physical length, semantic-space count, transfer count and weighted dynamic cost.
+
+When opening an existing INAV without its original IFC, all navigation 3D features remain available; only the optional BIM context mesh is absent.
 
 ## Native desktop bundle
 
@@ -53,8 +92,16 @@ python scripts/build_desktop.py
 
 PyInstaller creates `IFCPathBuilder` under `dist/`. Build on the target operating system (for example, build the Windows executable on Windows).
 
-The packaging helper collects IfcOpenShell and Shapely runtime files in addition to the Qt runtime.
+The packaging helper explicitly collects IFCPath desktop submodules plus IfcOpenShell and Shapely runtime files in addition to the Qt runtime.
 
 ## CI
 
-The normal test job compiles all Python sources. A second `desktop-smoke` job installs PySide6, uses Qt's `offscreen` platform and instantiates the main window with a synthetic INAV model. This catches missing Qt APIs, packaging/import mistakes and preview/model-binding regressions without requiring a display server.
+The normal test job compiles all Python sources. The `desktop-smoke` job installs PySide6, uses Qt's `offscreen` platform and qualifies:
+
+- main-window construction;
+- INAV model binding;
+- projected 3D viewport rendering;
+- screen-to-CDT world-point recovery;
+- hierarchical route calculation between selected world points.
+
+A Windows packaging job also builds and uploads an `IFCPathBuilder-Windows` PyInstaller artifact.
