@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 
 import shapely
 from shapely.geometry import LineString, Polygon
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from .geometry import Vec3, distance, triangle_normal
@@ -20,6 +22,7 @@ def prepare_space_floor(
     floor_tolerance_m: float = 0.12,
     max_slope_deg: float = 12.0,
     clearance_m: float = 0.0,
+    obstacle_footprints: Iterable[BaseGeometry] = (),
 ):
     floor = space_floor_polygon(
         vertices,
@@ -29,6 +32,21 @@ def prepare_space_floor(
     )
     if floor is None or floor.is_empty:
         return None
+
+    # Subtract fixed BIM obstacles before agent erosion. A negative buffer then
+    # shrinks the outer walkable boundary and expands obstacle holes by the same
+    # pedestrian clearance, which is the intended configuration-space behavior.
+    obstacles = [
+        obstacle
+        for obstacle in obstacle_footprints
+        if obstacle is not None and not obstacle.is_empty and floor.intersects(obstacle)
+    ]
+    if obstacles:
+        floor = shapely.difference(floor, unary_union(obstacles))
+        floor = shapely.make_valid(floor)
+        if floor.is_empty:
+            return None
+
     if clearance_m > 0.0:
         floor = shapely.buffer(floor, -clearance_m, join_style="mitre")
         floor = shapely.make_valid(floor)
@@ -43,15 +61,7 @@ def build_floor_cdt_graph(
     *,
     boundary_spacing_m: float = 1.0,
 ) -> tuple[list[Vec3], list[Edge]]:
-    """Build a sparse CDT dual graph with explicit boundary anchor samples.
-
-    Triangle centroids form the internal metric network. Internal shared edges
-    connect adjacent triangle centroids. Each polygon-boundary edge additionally
-    receives one or more interior edge samples (never the vertices themselves),
-    connected to its owning triangle centroid. Those boundary anchors give
-    semantic doors/transfers a stable geometric attachment point without relying
-    on an arbitrary centroid-distance threshold.
-    """
+    """Build a sparse CDT dual graph with explicit boundary anchor samples."""
     if floor is None or floor.is_empty:
         return [], []
 
@@ -99,8 +109,6 @@ def build_floor_cdt_graph(
         length = math.dist(start, end)
         divisions = max(1, int(math.ceil(length / spacing)))
         for k in range(divisions):
-            # Segment midpoints avoid creating zero-width shortcuts through a
-            # polygon vertex shared only by diagonally touching cells.
             t = (k + 0.5) / divisions
             boundary_point = (
                 start[0] + (end[0] - start[0]) * t,
@@ -122,6 +130,7 @@ def build_space_cdt_graph(
     max_slope_deg: float = 12.0,
     clearance_m: float = 0.0,
     boundary_spacing_m: float = 1.0,
+    obstacle_footprints: Iterable[BaseGeometry] = (),
 ) -> tuple[list[Vec3], list[Edge]]:
     """Build a sparse metric graph from an IFC space floor using CDT."""
     floor = prepare_space_floor(
@@ -130,6 +139,7 @@ def build_space_cdt_graph(
         floor_tolerance_m=floor_tolerance_m,
         max_slope_deg=max_slope_deg,
         clearance_m=clearance_m,
+        obstacle_footprints=obstacle_footprints,
     )
     return build_floor_cdt_graph(
         floor,
