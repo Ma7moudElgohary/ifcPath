@@ -21,6 +21,76 @@ class NavMeshRoute:
         return sum(distance(a, b) for a, b in zip(self.points, self.points[1:]))
 
 
+def find_navmesh_cell(
+    model: InavModel,
+    point: Vec3,
+    *,
+    space_id: str | None = None,
+    z_tolerance_m: float | None = 0.75,
+) -> NavCell | None:
+    """Locate the CDT cell containing ``point`` in XY, disambiguated by Z.
+
+    Indoor floors frequently overlap in XY. The original local router was safe
+    when a semantic ``space_id`` was supplied, but global point classification
+    must also distinguish stacked storeys. Among all triangles that contain the
+    XY point we therefore select the cell whose plane is closest in Z.
+    """
+    candidates = [
+        cell
+        for cell in model.cells
+        if (space_id is None or cell.space_id == space_id)
+        and _point_in_triangle_xy(point, cell.vertices_m)
+    ]
+    if not candidates:
+        return None
+
+    cell = min(candidates, key=lambda item: abs(_cell_z(item) - point[2]))
+    if z_tolerance_m is not None and abs(_cell_z(cell) - point[2]) > z_tolerance_m:
+        return None
+    return cell
+
+
+def snap_point_to_navmesh(
+    model: InavModel,
+    point: Vec3,
+    *,
+    space_id: str,
+    max_distance_m: float = 3.0,
+) -> tuple[Vec3, str] | None:
+    """Project a point onto the nearest triangle in one semantic space.
+
+    Portal centres and vertical landing samples can lie on the exact IFC space
+    boundary, or just outside a clearance-eroded walkable polygon. Returning a
+    deterministic nearest point gives hierarchical routing a geometric anchor
+    without reverting to arbitrary node-radius attachment.
+    """
+    cells = [cell for cell in model.cells if cell.space_id == space_id]
+    if not cells:
+        return None
+
+    containing = [cell for cell in cells if _point_in_triangle_xy(point, cell.vertices_m)]
+    if containing:
+        cell = min(containing, key=lambda item: abs(_cell_z(item) - point[2]))
+        snapped = (point[0], point[1], _cell_z(cell))
+        if distance(point, snapped) <= max_distance_m + _EPSILON:
+            return snapped, cell.id
+
+    best: tuple[float, Vec3, str] | None = None
+    for cell in cells:
+        cell_z = _cell_z(cell)
+        vertices = cell.vertices_m
+        for a, b in ((vertices[0], vertices[1]), (vertices[1], vertices[2]), (vertices[2], vertices[0])):
+            candidate_xy = _closest_point_on_segment_xy(point, a, b)
+            candidate = (candidate_xy[0], candidate_xy[1], cell_z)
+            candidate_distance = distance(point, candidate)
+            if best is None or candidate_distance < best[0]:
+                best = (candidate_distance, candidate, cell.id)
+
+    if best is None or best[0] > max_distance_m + _EPSILON:
+        return None
+    return best[1], best[2]
+
+
 def find_navmesh_path(
     model: InavModel,
     start: Vec3,
@@ -64,10 +134,10 @@ def find_navmesh_path(
 
 
 def _find_cell(cells: list[NavCell], point: Vec3) -> NavCell | None:
-    for cell in cells:
-        if _point_in_triangle_xy(point, cell.vertices_m):
-            return cell
-    return None
+    candidates = [cell for cell in cells if _point_in_triangle_xy(point, cell.vertices_m)]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: abs(_cell_z(item) - point[2]))
 
 
 def _cell_corridor(
@@ -127,14 +197,7 @@ def _oriented_portal(
     nxt: NavCell,
     shared: tuple[Vec3, Vec3],
 ) -> tuple[Vec3, Vec3]:
-    """Return shared edge endpoints in the funnel algorithm's left/right order.
-
-    The standard simple-stupid funnel implementation assumes a portal winding
-    convention opposite to the intuitive positive-cross "left of travel"
-    classification. Keeping that convention explicit is critical: reversing it
-    causes string pulling to select the outer polygon corners instead of the taut
-    path around an obstacle.
-    """
+    """Return shared edge endpoints in the funnel algorithm's left/right order."""
     a, b = shared
     current_center = _centroid(current)
     next_center = _centroid(nxt)
@@ -221,6 +284,21 @@ def _centroid(cell: NavCell) -> Vec3:
         (a[1] + b[1] + c[1]) / 3.0,
         (a[2] + b[2] + c[2]) / 3.0,
     )
+
+
+def _cell_z(cell: NavCell) -> float:
+    return sum(vertex[2] for vertex in cell.vertices_m) / 3.0
+
+
+def _closest_point_on_segment_xy(point: Vec3, a: Vec3, b: Vec3) -> tuple[float, float]:
+    ab_x = b[0] - a[0]
+    ab_y = b[1] - a[1]
+    denominator = ab_x * ab_x + ab_y * ab_y
+    if denominator <= _EPSILON:
+        return a[0], a[1]
+    t = ((point[0] - a[0]) * ab_x + (point[1] - a[1]) * ab_y) / denominator
+    t = min(1.0, max(0.0, t))
+    return a[0] + ab_x * t, a[1] + ab_y * t
 
 
 def _triarea2(a: Vec3, b: Vec3, c: Vec3) -> float:

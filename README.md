@@ -18,6 +18,9 @@ IfcOpenShell semantics + world geometry
 └──────────────┬───────────────┴──────────────┬───────────────┘
                └───────────────┬──────────────┘
                                ↓
+                    transfer-anchor hierarchy
+                  local funnel + vertical geometry
+                               ↓
                          portable .inav
                                ↓
                      Unreal / other targets
@@ -78,6 +81,54 @@ Quantitative tests require:
 
 The old centroid graph therefore remains a connectivity/search representation, not the final visible path geometry.
 
+### Hierarchical building routing
+
+Building-wide routing now searches a **transfer-anchor graph**, not a space-hop graph and not the raw centroid graph.
+
+```text
+start position
+    ↓
+local CDT / funnel path
+    ↓
+door or vertical landing anchor
+    ↓
+semantic transfer
+    ↓
+next-space anchor
+    ↓
+local CDT / funnel path
+    ↓
+... repeated across rooms/storeys ...
+    ↓
+goal
+```
+
+Every usable door or stair/ramp landing contributes an anchor on each connected semantic space. Anchors within a space are connected using the exact local funnel path; semantic transfers connect anchors between spaces. Global Dijkstra therefore evaluates competing doors and alternative room sequences using real geometric distance.
+
+Vertical transfers preserve the sampled stair/ramp geometry from the BIM-derived metric graph instead of collapsing a storey change into a straight Z segment.
+
+The Python API is:
+
+```python
+from ifcpath.hierarchical_routing import (
+    HierarchicalRouteOptions,
+    find_hierarchical_path,
+)
+
+route = find_hierarchical_path(
+    model,
+    start=(1.0, 2.0, 0.0),
+    goal=(20.0, 5.0, 6.0),
+    options=HierarchicalRouteOptions(
+        blocked_portals={"door:locked"},
+        blocked_spaces={"space:fire"},
+        space_cost_multipliers={"space:smoke": 5.0},
+    ),
+)
+```
+
+The returned route contains stitched 3D points, ordered semantic spaces/transitions, physical length and weighted dynamic cost.
+
 ### Dynamic Digital Twin routing
 
 Runtime state is kept separate from BIM preprocessing:
@@ -121,6 +172,24 @@ Copy `Unreal/IFCPath` into your Unreal project's `Plugins` directory and rebuild
 
 `UIFCPathSubsystem` exposes Blueprint-callable operations.
 
+### Hierarchical building route
+
+Use:
+
+- `FindHierarchicalPathFromWorldPositions(StartWorldPosition, GoalWorldPosition)`
+
+It returns:
+
+- stitched world-space route points;
+- ordered semantic space IDs;
+- ordered transition IDs;
+- physical route length in metres;
+- weighted dynamic cost in metres-equivalent units.
+
+The Unreal runtime derives door transfers from the already-qualified portal edges and stair/ramp transfers from the loaded vertical metric components. It then applies the same architecture as the Python reference: exact local funnel routes inside CDT spaces, sampled vertical connector geometry between levels, and dynamic-cost Dijkstra across transfer anchors.
+
+This means two doors joining the same pair of rooms are no longer equivalent: the route can choose the door that is actually shorter from the current start/goal positions, and it will switch when a door is blocked or an intermediate space receives a live hazard/congestion multiplier.
+
 ### Existing building-wide graph routing
 
 - `LoadInav(FilePath)`
@@ -128,7 +197,7 @@ Copy `Unreal/IFCPath` into your Unreal project's `Plugins` directory and rebuild
 - `FindNearestNode(WorldPosition, MaxDistanceCm)`
 - `FindPathFromWorldPositions(StartWorldPosition, GoalWorldPosition, MaxSnapDistanceCm)`
 
-This pathfinder supports dynamic door/space state and remains the fallback for cross-space and non-CDT segments.
+This graph pathfinder remains available as a backward-compatible fallback for legacy consumers.
 
 ### Accurate CDT local routing
 
@@ -177,12 +246,21 @@ Current qualified baseline after the research-backed geometry/topology work:
 
 The real-IFC gate also validates navmesh cell IDs, nondegenerate triangles, reciprocal cell adjacency, cell space/level consistency and node→cell references.
 
+The hierarchical reference suite additionally qualifies:
+
+- choosing the geometrically shorter of competing doors;
+- rerouting when that portal is blocked;
+- switching room sequences when a live cost multiplier changes;
+- Z-aware classification for overlapping stacked floors;
+- preservation of sampled stair geometry in the final 3D route;
+- blocked-space no-entry behavior.
+
 ## Research-driven roadmap
 
-1. Stitch semantic building routes with local funnel paths so cross-room Unreal routes use accurate geometry end-to-end.
-2. Add an IFC4 fixture matrix with atria, multiple stairs, ramps, elevators and narrow doors.
-3. Improve exterior/exit classification using IFC boundary semantics and properties.
-4. Add route-profile constraints (wheelchair, responder, security, maintenance).
-5. Add real OD-pair/reference-path length benchmarks in addition to synthetic analytic tests.
+1. Add an IFC4 fixture matrix with atria, multiple stairs, ramps, elevators and narrow doors.
+2. Improve exterior/exit classification using IFC boundary semantics and properties.
+3. Add route-profile constraints (wheelchair, responder, security, maintenance).
+4. Add real OD-pair/reference-path length benchmarks in addition to synthetic analytic tests.
+5. Add time-dependent hazard costs for evolving fire/smoke fields and incremental replanning.
 6. Add an Unreal build/automation runner so the C++ plugin itself is compiled in CI.
 7. Replace debug lines with a reusable spline/Niagara route presentation layer.
