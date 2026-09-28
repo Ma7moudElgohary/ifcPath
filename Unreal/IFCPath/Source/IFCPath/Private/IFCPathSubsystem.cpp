@@ -69,7 +69,7 @@ bool UIFCPathSubsystem::LoadInav(const FString& FilePath, FString& Error)
 
     for (const TPair<FString, FIFCPathNode>& Pair : Nodes)
     {
-        Adjacency.Add(Pair.Key, {});
+        Adjacency.Add(Pair.Key, TArray<FIFCPathAdjacencyEntry>());
     }
 
     const TArray<TSharedPtr<FJsonValue>>* JsonEdges = nullptr;
@@ -119,13 +119,17 @@ bool UIFCPathSubsystem::FindPath(
     TArray<FVector>& OutPoints) const
 {
     OutPoints.Reset();
-    if (!Nodes.Contains(StartNodeId) || !Nodes.Contains(GoalNodeId))
+    const FIFCPathNode* StartNode = Nodes.Find(StartNodeId);
+    const FIFCPathNode* GoalNode = Nodes.Find(GoalNodeId);
+    if (StartNode == nullptr || GoalNode == nullptr)
     {
         return false;
     }
 
-    const FIFCPathNode* GoalNode = Nodes.Find(GoalNodeId);
-    if (GoalNode != nullptr && !GoalNode->SpaceId.IsEmpty() && BlockedSpaces.Contains(GoalNode->SpaceId))
+    const FString StartSpaceId = StartNode->SpaceId;
+    if (!GoalNode->SpaceId.IsEmpty()
+        && BlockedSpaces.Contains(GoalNode->SpaceId)
+        && GoalNode->SpaceId != StartSpaceId)
     {
         return false;
     }
@@ -186,7 +190,12 @@ bool UIFCPathSubsystem::FindPath(
             {
                 continue;
             }
-            if (!NextNode->SpaceId.IsEmpty() && BlockedSpaces.Contains(NextNode->SpaceId))
+
+            // A blocked space is a no-entry region. An agent that starts inside
+            // one may continue moving within that same start space to escape.
+            if (!NextNode->SpaceId.IsEmpty()
+                && BlockedSpaces.Contains(NextNode->SpaceId)
+                && NextNode->SpaceId != StartSpaceId)
             {
                 continue;
             }
@@ -248,11 +257,6 @@ bool UIFCPathSubsystem::FindNearestNode(
     const FIFCPathNode* BestNode = nullptr;
     for (const TPair<FString, FIFCPathNode>& Pair : Nodes)
     {
-        if (!Pair.Value.SpaceId.IsEmpty() && BlockedSpaces.Contains(Pair.Value.SpaceId))
-        {
-            continue;
-        }
-
         const double DistanceSquared = FVector::DistSquared(WorldPosition, Pair.Value.Position);
         if (DistanceSquared <= BestDistanceSquared)
         {
@@ -327,7 +331,7 @@ void UIFCPathSubsystem::SetSpaceCostMultiplier(const FString& SpaceId, float Cos
         return;
     }
 
-    const double Value = FMath::Max(0.01, static_cast<double>(CostMultiplier));
+    const double Value = FMath::Max(1.0, static_cast<double>(CostMultiplier));
     if (FMath::IsNearlyEqual(Value, 1.0))
     {
         SpaceCostMultipliers.Remove(SpaceId);
