@@ -14,6 +14,18 @@ struct FIFCPathNode
 
     UPROPERTY(BlueprintReadOnly)
     FVector Position = FVector::ZeroVector;
+
+    UPROPERTY(BlueprintReadOnly)
+    FString Kind;
+
+    UPROPERTY(BlueprintReadOnly)
+    FString LevelId;
+
+    UPROPERTY(BlueprintReadOnly)
+    FString SpaceId;
+
+    UPROPERTY(BlueprintReadOnly)
+    FString PortalId;
 };
 
 USTRUCT()
@@ -23,6 +35,13 @@ struct FIFCPathEdge
 
     FString A;
     FString B;
+    double DistanceMeters = 0.0;
+    FString PortalId;
+};
+
+struct FIFCPathAdjacencyEntry
+{
+    FString NodeId;
     double DistanceMeters = 0.0;
     FString PortalId;
 };
@@ -51,8 +70,23 @@ public:
         FString& OutStartNodeId,
         FString& OutGoalNodeId) const;
 
-    UFUNCTION(BlueprintCallable, Category="IFCPath")
+    UFUNCTION(BlueprintCallable, Category="IFCPath|Dynamic State")
     void SetPortalBlocked(const FString& PortalId, bool bBlocked);
+
+    UFUNCTION(BlueprintCallable, Category="IFCPath|Dynamic State")
+    void SetSpaceBlocked(const FString& SpaceId, bool bBlocked);
+
+    UFUNCTION(BlueprintCallable, Category="IFCPath|Dynamic State")
+    void SetSpaceCostMultiplier(const FString& SpaceId, float CostMultiplier);
+
+    UFUNCTION(BlueprintCallable, Category="IFCPath|Dynamic State")
+    void ClearDynamicState();
+
+    UFUNCTION(BlueprintPure, Category="IFCPath|Dynamic State")
+    bool IsSpaceBlocked(const FString& SpaceId) const;
+
+    UFUNCTION(BlueprintPure, Category="IFCPath|Dynamic State")
+    float GetSpaceCostMultiplier(const FString& SpaceId) const;
 
     UFUNCTION(BlueprintCallable, Category="IFCPath|Debug")
     void DrawDebugPath(const TArray<FVector>& Points, FLinearColor Color, float Thickness = 8.0f, float Duration = 10.0f) const;
@@ -69,7 +103,12 @@ public:
 private:
     TMap<FString, FIFCPathNode> Nodes;
     TArray<FIFCPathEdge> Edges;
-    TSet<FString> BlockedPortals;
+    TMap<FString, TArray<FIFCPathAdjacencyEntry>> Adjacency;
 
+    TSet<FString> BlockedPortals;
+    TSet<FString> BlockedSpaces;
+    TMap<FString, double> SpaceCostMultipliers;
+
+    double GetTraversalMultiplier(const FIFCPathNode& A, const FIFCPathNode& B) const;
     static FVector ToUnrealPosition(double X, double Y, double Z);
 };

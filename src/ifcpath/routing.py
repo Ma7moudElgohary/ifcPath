@@ -11,14 +11,36 @@ from .model import InavModel
 class RouteOptions:
     blocked_portals: set[str] | None = None
     blocked_nodes: set[str] | None = None
+    blocked_spaces: set[str] | None = None
     hazard_costs: dict[str, float] | None = None
+    space_cost_multipliers: dict[str, float] | None = None
 
 
 def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptions | None = None) -> list[str]:
+    """Find a dynamic route through an INAV model.
+
+    ``blocked_spaces`` are treated as no-entry regions. If the route starts
+    inside one of them, movement inside that start space is still allowed so an
+    occupant can evacuate out. ``space_cost_multipliers`` are penalties >= 1.0
+    suitable for smoke, crowd density, security preference, or other Digital
+    Twin state that should discourage rather than completely disable a space.
+    """
     options = options or RouteOptions()
     blocked_portals = options.blocked_portals or set()
     blocked_nodes = options.blocked_nodes or set()
+    blocked_spaces = options.blocked_spaces or set()
     hazard_costs = options.hazard_costs or {}
+    space_cost_multipliers = options.space_cost_multipliers or {}
+
+    nodes = {node.id: node for node in model.nodes}
+    start_node = nodes.get(start_id)
+    goal_node = nodes.get(goal_id)
+    if start_node is None or goal_node is None:
+        return []
+
+    start_space_id = start_node.space_id
+    if goal_node.space_id in blocked_spaces and goal_node.space_id != start_space_id:
+        return []
 
     adjacency: dict[str, list[tuple[str, float]]] = {}
     for edge in model.edges:
@@ -26,8 +48,28 @@ def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptio
             continue
         if edge.a in blocked_nodes or edge.b in blocked_nodes:
             continue
-        penalty = max(0.0, hazard_costs.get(edge.a, 0.0), hazard_costs.get(edge.b, 0.0))
-        cost = edge.distance_m * (1.0 + penalty)
+
+        a_node = nodes.get(edge.a)
+        b_node = nodes.get(edge.b)
+        if a_node is None or b_node is None:
+            continue
+
+        if (
+            a_node.space_id in blocked_spaces
+            and a_node.space_id != start_space_id
+        ) or (
+            b_node.space_id in blocked_spaces
+            and b_node.space_id != start_space_id
+        ):
+            continue
+
+        node_penalty = max(0.0, hazard_costs.get(edge.a, 0.0), hazard_costs.get(edge.b, 0.0))
+        space_multiplier = max(
+            1.0,
+            space_cost_multipliers.get(a_node.space_id or "", 1.0),
+            space_cost_multipliers.get(b_node.space_id or "", 1.0),
+        )
+        cost = edge.distance_m * space_multiplier * (1.0 + node_penalty)
         adjacency.setdefault(edge.a, []).append((edge.b, cost))
         adjacency.setdefault(edge.b, []).append((edge.a, cost))
 
