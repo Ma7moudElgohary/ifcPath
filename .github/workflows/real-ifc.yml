@@ -1,0 +1,43 @@
+name: real-ifc-qualification
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  duplex-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e "."
+      - name: Download buildingSMART Duplex IFC
+        run: |
+          curl -L --fail --retry 3 \
+            https://raw.githubusercontent.com/andyward/XBimDemo/master/Xbim.TestApp/Duplex_A_20110907.ifc \
+            -o /tmp/Duplex_A_20110907.ifc
+          head -c 13 /tmp/Duplex_A_20110907.ifc | grep -q 'ISO-10303-21;'
+      - name: Build INAV from real IFC
+        run: |
+          ifcpath build /tmp/Duplex_A_20110907.ifc \
+            -o /tmp/Duplex_A_20110907.inav \
+            --floor-spacing 1.0 \
+            --stair-spacing 0.25 \
+            --connect-distance 1.5
+      - name: Validate generated INAV
+        run: |
+          ifcpath validate /tmp/Duplex_A_20110907.inav --json > /tmp/qualification.json
+          cat /tmp/qualification.json
+          python scripts/assert_reference_qualification.py /tmp/qualification.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: duplex-reference-qualification
+          path: |
+            /tmp/Duplex_A_20110907.inav
+            /tmp/qualification.json

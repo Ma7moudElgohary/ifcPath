@@ -25,26 +25,63 @@ def sample_walkable_triangles(
     max_slope_deg: float = 45.0,
     max_points: int = 50000,
 ) -> list[Vec3]:
-    """Sample upward-facing walkable surfaces.
-
-    This keeps the fast surface-sampling idea used by Topologic Studio while
-    explicitly rejecting downward slab/landing faces, which otherwise create
-    duplicate navigation layers beneath floors.
-    """
-    points: list[Vec3] = []
+    """Sample upward-facing walkable surfaces."""
     min_up = math.cos(math.radians(max_slope_deg))
+    accepted: list[tuple[Vec3, Vec3, Vec3]] = []
     for ia, ib, ic in triangles:
         a, b, c = vertices[ia], vertices[ib], vertices[ic]
-        n = triangle_normal(a, b, c)
-        if n[2] < min_up:
+        if triangle_normal(a, b, c)[2] >= min_up:
+            accepted.append((a, b, c))
+    return _sample_triangles(accepted, spacing_m, max_points)
+
+
+def sample_space_floor_triangles(
+    vertices: list[Vec3],
+    triangles: list[tuple[int, int, int]],
+    spacing_m: float = 0.75,
+    floor_tolerance_m: float = 0.12,
+    max_slope_deg: float = 12.0,
+    max_points: int = 50000,
+) -> list[Vec3]:
+    """Sample the actual bottom floor surface of an IFC space volume.
+
+    IfcSpace solids normally contain a horizontal bottom face whose triangle
+    winding can point either up or down. We therefore use ``abs(normal.z)`` and
+    restrict samples to triangles close to the minimum space elevation. This is
+    materially more reliable than sampling a whole building slab and later
+    guessing room membership from bounding boxes.
+    """
+    if not vertices:
+        return []
+    floor_z = min(v[2] for v in vertices)
+    min_vertical = math.cos(math.radians(max_slope_deg))
+    accepted: list[tuple[Vec3, Vec3, Vec3]] = []
+    for ia, ib, ic in triangles:
+        a, b, c = vertices[ia], vertices[ib], vertices[ic]
+        if max(a[2], b[2], c[2]) > floor_z + floor_tolerance_m:
             continue
+        if abs(triangle_normal(a, b, c)[2]) < min_vertical:
+            continue
+        accepted.append((a, b, c))
+    return _sample_triangles(accepted, spacing_m, max_points)
+
+
+def _sample_triangles(
+    triangles: list[tuple[Vec3, Vec3, Vec3]],
+    spacing_m: float,
+    max_points: int,
+) -> list[Vec3]:
+    points: list[Vec3] = []
+    for a, b, c in triangles:
         area2 = math.dist((0, 0, 0), (
             (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),
             (b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),
             (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]),
         ))
         area = area2 * 0.5
-        divisions = max(1, int(math.ceil(math.sqrt(max(area, 1e-9)) / max(spacing_m, 1e-3))))
+        if area <= 1e-10:
+            continue
+        divisions = max(1, int(math.ceil(math.sqrt(area) / max(spacing_m, 1e-3))))
         for i in range(divisions + 1):
             for j in range(divisions + 1 - i):
                 u, v = i / divisions, j / divisions
@@ -59,25 +96,39 @@ def sample_walkable_triangles(
     return points
 
 
-def build_radius_edges(points: list[Vec3], max_distance_m: float) -> list[tuple[int, int, float]]:
-    """Spatial-hash radius graph, avoiding O(n^2) all-pairs checks."""
-    if not points or max_distance_m <= 0:
+def build_radius_edges(
+    points: list[Vec3],
+    max_distance_m: float,
+    max_neighbors: int = 8,
+) -> list[tuple[int, int, float]]:
+    """Build a sparse local graph using spatial hashing and bounded neighbours."""
+    if not points or max_distance_m <= 0 or max_neighbors <= 0:
         return []
+
     inv = 1.0 / max_distance_m
     buckets: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for i, p in enumerate(points):
         buckets[(math.floor(p[0]*inv), math.floor(p[1]*inv), math.floor(p[2]*inv))].append(i)
 
-    edges: list[tuple[int, int, float]] = []
+    selected: dict[tuple[int, int], float] = {}
     for i, p in enumerate(points):
         key = (math.floor(p[0]*inv), math.floor(p[1]*inv), math.floor(p[2]*inv))
+        candidates: list[tuple[float, int]] = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for dz in (-1, 0, 1):
                     for j in buckets.get((key[0]+dx, key[1]+dy, key[2]+dz), []):
-                        if j <= i:
+                        if j == i:
                             continue
                         d = distance(p, points[j])
-                        if d <= max_distance_m:
-                            edges.append((i, j, d))
-    return edges
+                        if 1e-9 < d <= max_distance_m:
+                            candidates.append((d, j))
+
+        candidates.sort(key=lambda item: item[0])
+        for d, j in candidates[:max_neighbors]:
+            a, b = (i, j) if i < j else (j, i)
+            current = selected.get((a, b))
+            if current is None or d < current:
+                selected[(a, b)] = d
+
+    return [(a, b, d) for (a, b), d in sorted(selected.items())]
