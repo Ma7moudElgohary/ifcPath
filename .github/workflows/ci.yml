@@ -16,4 +16,19 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[test]"
-      - run: pytest -q
+      - run: python -m compileall -q src scripts
+      - run: pytest -q --ignore=tests/test_desktop_builder.py
+
+  desktop-smoke:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[desktop,test]"
+      - run: pytest -q tests/test_desktop_builder.py
