@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from shapely.geometry import Polygon
 
 from ifcpath.cdt import build_floor_cdt_navmesh
@@ -10,6 +11,8 @@ from ifcpath.hybrid_evacuation import (
     HybridEvacuationSimulator,
     compile_hybrid_route_steps,
 )
+from ifcpath.microscopic_motion import MicroscopicMotionConfig
+from ifcpath.microscopic_route import MicroscopicRouteConfig
 from ifcpath.model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, Space
 
 
@@ -195,3 +198,40 @@ def test_replan_fails_closed_while_agent_is_onboard() -> None:
         assert "onboard an elevator" in str(exc)
     else:
         raise AssertionError("replan should fail closed while elevator is in use")
+
+
+def test_real_jupedsim_local_motion_hands_off_through_shared_elevator() -> None:
+    pytest.importorskip("jupedsim")
+    model = _three_floor_elevator_model()
+    simulator = HybridEvacuationSimulator(
+        model,
+        [EvacuationAgentSpec("a", (5.0, 2.0, 6.0), 1.4)],
+        config=EvacuationConfig(exit_specific_flow_pps_per_m=10.0),
+        hybrid_config=HybridEvacuationConfig(
+            local_backend="jupedsim",
+            microscopic=MicroscopicMotionConfig(dt_s=0.05, model="cfsm_v2"),
+            route=MicroscopicRouteConfig(
+                update_step_s=0.05,
+                waypoint_tolerance_m=0.20,
+            ),
+            elevator=ElevatorRuntimeConfig(
+                speed_mps=3.0,
+                door_dwell_s=0.25,
+                capacity_persons=2,
+            ),
+        ),
+    )
+
+    saw_elevator = False
+    saw_jupedsim_domain = False
+    while not simulator.finished and simulator.elapsed_s < 40.0:
+        simulator.advance(0.05)
+        state = simulator.agents[0]
+        saw_elevator = saw_elevator or state.status in {"elevator_waiting", "elevator"}
+        saw_jupedsim_domain = saw_jupedsim_domain or bool(simulator.controller_domains)
+
+    assert saw_jupedsim_domain
+    assert saw_elevator
+    assert simulator.agents[0].status == "evacuated"
+    assert simulator.stats.exit_usage == {"exit:ground": 1}
+    assert len(simulator.elevator_resource_ids) == 1
