@@ -1,11 +1,9 @@
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, Point, Polygon
 
 from ifcpath.cdt import build_space_cdt_graph
 
 
 def test_cdt_graph_respects_concave_space_boundary():
-    # L-shaped floor represented by four triangles at z=0 plus a simple roof
-    # vertex so the floor-selection code sees a space volume elevation range.
     vertices = [
         (0.0, 0.0, 0.0),
         (4.0, 0.0, 0.0),
@@ -28,7 +26,7 @@ def test_cdt_graph_respects_concave_space_boundary():
     assert len(points) >= 4
     assert edges
     for point in points:
-        assert floor.covers(Polygon([(point[0], point[1]), (point[0], point[1]), (point[0], point[1])]).centroid)
+        assert floor.covers(Point(point[0], point[1]))
     for a, b, _ in edges:
         line = LineString([(points[a][0], points[a][1]), (points[b][0], points[b][1])])
         assert floor.covers(line)
