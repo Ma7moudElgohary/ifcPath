@@ -101,6 +101,34 @@ def test_scenario_change_reroutes_from_current_agent_position_and_keeps_walking(
     app.processEvents()
 
 
+def test_repeated_scenario_edits_keep_current_reroute_origin() -> None:
+    app, window = _window_with_route()
+    window.walk_speed_spin.setValue(1.0)
+    window._walker.play()
+    window._advance_simulation(0.4)
+    current = window._walker.position
+    assert current is not None
+
+    window.hazard_multiplier_spin.setValue(4.0)
+    window._apply_space_hazard()
+    assert window._walker.position == pytest.approx(current)
+    assert window._walker.distance_m == pytest.approx(0.0)
+
+    # The second edit occurs before any additional movement. It must not fall
+    # back to the originally picked start merely because route progress is zero.
+    window.hazard_multiplier_spin.setValue(8.0)
+    window._apply_space_hazard()
+
+    assert window._route is not None
+    assert window._route.points[0] == pytest.approx(current)
+    assert window._walker.position == pytest.approx(current)
+    assert window._walker.running
+
+    window._pause_simulation()
+    window.close()
+    app.processEvents()
+
+
 def test_restart_returns_agent_to_original_picked_start() -> None:
     app, window = _window_with_route()
     window.walk_speed_spin.setValue(1.0)
