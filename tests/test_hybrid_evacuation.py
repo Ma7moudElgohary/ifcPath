@@ -111,6 +111,53 @@ def _two_floor_stair_model() -> InavModel:
     return model
 
 
+def _same_floor_door_gap_model() -> InavModel:
+    model = InavModel(levels=[Level("L1", "Ground", 0.0)])
+    # The 0.4 m gap intentionally represents non-walkable wall thickness. The
+    # semantic portal provides the only valid crossing between the two CDT domains.
+    _add_rect_space(
+        model,
+        "A",
+        x0=0.0,
+        y0=0.0,
+        x1=5.0,
+        y1=4.0,
+        z=0.0,
+        level_id="L1",
+    )
+    _add_rect_space(
+        model,
+        "B",
+        x0=5.4,
+        y0=0.0,
+        x1=10.4,
+        y1=4.0,
+        z=0.0,
+        level_id="L1",
+    )
+    model.portals = [
+        Portal(
+            "door:AB",
+            "door",
+            (5.2, 2.0, 0.0),
+            from_space_id="A",
+            to_space_id="B",
+            level_id="L1",
+            width_m=1.0,
+        ),
+        Portal(
+            "exit:B",
+            "door",
+            (9.9, 2.0, 0.0),
+            from_space_id="B",
+            level_id="L1",
+            width_m=1.2,
+            is_exit=True,
+        ),
+    ]
+    return model
+
+
 def _run_to_completion(
     simulator: HybridEvacuationSimulator,
     *,
@@ -130,15 +177,43 @@ def test_hybrid_route_compiles_gate_before_true_3d_vertical_transfer() -> None:
 
     assert state.plan is not None
     steps = compile_hybrid_route_steps(model, state.plan, simulator.config)
-    vertical_index = next(index for index, step in enumerate(steps) if step.kind == "vertical")
+    transfer_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.kind == "transfer" and step.transition_kind == "stair"
+    )
 
-    assert vertical_index > 0
-    assert steps[vertical_index - 1].kind == "gate"
-    assert steps[vertical_index - 1].gate is not None
-    assert steps[vertical_index - 1].gate.kind == "stair"
-    assert max(point[2] for point in steps[vertical_index].points) - min(
-        point[2] for point in steps[vertical_index].points
+    assert transfer_index > 0
+    assert steps[transfer_index - 1].kind == "gate"
+    assert steps[transfer_index - 1].gate is not None
+    assert steps[transfer_index - 1].gate.kind == "stair"
+    assert max(point[2] for point in steps[transfer_index].points) - min(
+        point[2] for point in steps[transfer_index].points
     ) > 2.5
+
+
+def test_same_floor_door_is_gate_then_explicit_transfer_not_local_solver_jump() -> None:
+    model = _same_floor_door_gap_model()
+    simulator = HybridEvacuationSimulator(
+        model,
+        [EvacuationAgentSpec("a", (1.0, 2.0, 0.0), 1.2)],
+    )
+    state = simulator.agents[0]
+
+    assert state.plan is not None
+    steps = compile_hybrid_route_steps(model, state.plan, simulator.config)
+    door_transfer_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.kind == "transfer" and step.transition_id == "transition:door:AB"
+    )
+
+    assert steps[door_transfer_index - 1].kind == "gate"
+    assert steps[door_transfer_index - 1].gate is not None
+    assert steps[door_transfer_index - 1].gate.portal_id == "door:AB"
+    xs = [point[0] for point in steps[door_transfer_index].points]
+    assert min(xs) <= 5.0
+    assert max(xs) >= 5.4
 
 
 def test_kinematic_hybrid_hands_agent_from_upper_to_lower_level() -> None:
@@ -154,20 +229,20 @@ def test_kinematic_hybrid_hands_agent_from_upper_to_lower_level() -> None:
     )
 
     saw_upper = False
-    saw_vertical = False
+    saw_transfer = False
     saw_intermediate_z = False
     saw_lower = False
     while not simulator.finished and simulator.elapsed_s < 30.0:
         simulator.advance(0.05)
         state = simulator.agents[0]
         saw_upper = saw_upper or state.active_level_id == "L2"
-        saw_vertical = saw_vertical or state.status == "vertical"
+        saw_transfer = saw_transfer or state.status == "transfer"
         saw_intermediate_z = saw_intermediate_z or (0.25 < state.position[2] < 2.75)
         saw_lower = saw_lower or state.active_level_id == "L1"
 
     state = simulator.agents[0]
     assert saw_upper
-    assert saw_vertical
+    assert saw_transfer
     assert saw_intermediate_z
     assert saw_lower
     assert state.status == "evacuated"
@@ -268,15 +343,50 @@ def test_jupedsim_hybrid_crosses_real_vertical_handoff() -> None:
         ),
     )
 
-    saw_vertical = False
+    saw_transfer = False
     saw_lower_solver = False
     while not simulator.finished and simulator.elapsed_s < 35.0:
         simulator.advance(0.05)
         state = simulator.agents[0]
-        saw_vertical = saw_vertical or state.status == "vertical"
+        saw_transfer = saw_transfer or state.status == "transfer"
         saw_lower_solver = saw_lower_solver or state.active_level_id == "L1"
 
-    assert saw_vertical
+    assert saw_transfer
     assert saw_lower_solver
     assert simulator.agents[0].status == "evacuated"
     assert simulator.stats.exit_usage == {"exit:ground": 1}
+
+
+def test_jupedsim_hybrid_crosses_disconnected_same_floor_spaces_through_door() -> None:
+    pytest.importorskip("jupedsim")
+    model = _same_floor_door_gap_model()
+    simulator = HybridEvacuationSimulator(
+        model,
+        [EvacuationAgentSpec("a", (1.0, 2.0, 0.0), 1.3)],
+        config=EvacuationConfig(
+            door_specific_flow_pps_per_m=5.0,
+            exit_specific_flow_pps_per_m=5.0,
+        ),
+        hybrid_config=HybridEvacuationConfig(
+            local_backend="jupedsim",
+            microscopic=MicroscopicMotionConfig(dt_s=0.05, model="cfsm_v2"),
+            route=MicroscopicRouteConfig(
+                update_step_s=0.05,
+                waypoint_tolerance_m=0.20,
+            ),
+        ),
+    )
+
+    saw_door_transfer = False
+    crossed_wall_gap = False
+    while not simulator.finished and simulator.elapsed_s < 30.0:
+        simulator.advance(0.05)
+        state = simulator.agents[0]
+        if state.status == "transfer":
+            saw_door_transfer = True
+            crossed_wall_gap = crossed_wall_gap or (5.0 < state.position[0] < 5.4)
+
+    assert saw_door_transfer
+    assert crossed_wall_gap
+    assert simulator.agents[0].status == "evacuated"
+    assert simulator.stats.exit_usage == {"exit:B": 1}
