@@ -28,6 +28,15 @@ def test_samples_space_bottom_even_with_downward_winding():
     assert all(abs(p[2]) < 1e-9 for p in pts)
 
 
+def test_skinny_triangle_sampling_respects_long_edge_spacing():
+    verts = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (0.0, 0.1, 0.0)]
+    pts = sample_walkable_triangles(verts, [(0, 1, 2)], spacing_m=1.0)
+    long_edge_x = sorted(p[0] for p in pts if abs(p[1]) < 1e-9)
+    gaps = [b - a for a, b in zip(long_edge_x, long_edge_x[1:])]
+    assert len(long_edge_x) >= 11
+    assert max(gaps) <= 1.000001
+
+
 def test_radius_edges_connect_near_points_only():
     pts = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (3.0, 0.0, 0.0)]
     edges = build_radius_edges(pts, 1.1)
@@ -41,3 +50,18 @@ def test_radius_edges_bound_dense_neighbourhoods():
     edges = build_radius_edges(pts, 1.0, max_neighbors=4)
     assert len(edges) < len(pts) * 4
     assert len(edges) < 435
+
+
+def test_candidate_filter_runs_before_neighbour_limit():
+    pts = [(0.0, 0.0, 0.0)] + [(i * 0.1, 0.0, 0.0) for i in range(1, 9)] + [(0.9, 0.0, 0.0)]
+
+    def allowed(i: int, j: int) -> bool:
+        if i == 0:
+            return j == 9
+        if j == 0:
+            return i == 9
+        return True
+
+    edges = build_radius_edges(pts, 1.0, max_neighbors=2, candidate_filter=allowed)
+    pairs = {(a, b) for a, b, _ in edges}
+    assert (0, 9) in pairs
