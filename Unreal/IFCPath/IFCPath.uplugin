@@ -1,0 +1,16 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "IFCPath",
+  "Description": "Runtime importer and dynamic indoor routing for IFCPath .inav files.",
+  "Category": "Digital Twin",
+  "CanContainContent": false,
+  "Modules": [
+    {
+      "Name": "IFCPath",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
