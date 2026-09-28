@@ -1,0 +1,18 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "IFCPath",
+  "Description": "Import IFCPath .inav indoor navigation data and route through it at runtime.",
+  "Category": "Digital Twin",
+  "CreatedBy": "IFCPath",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Modules": [
+    {
+      "Name": "IFCPathRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
