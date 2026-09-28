@@ -334,11 +334,12 @@ class IFCPathScenarioWindow(IFCPathBuilder3DWindow):
         )
         self._route = route
         if route is None:
+            frozen_position = route_start or self._walker.position or self._start_point
+            frozen_forward = self._walker.forward_xy
+            self._walker.clear()
             self.route_label.setText("Route: no valid path under current scenario")
             self.preview.set_route(self._start_point, self._goal_point, [])
-            if route_start is not None:
-                self.preview.set_agent_pose(route_start, self._walker.forward_xy)
-            self._walker.pause()
+            self.preview.set_agent_pose(frozen_position, frozen_forward)
             if hasattr(self, "_simulation_timer"):
                 self._simulation_timer.stop()
             self._apply_scenario_to_preview()
@@ -352,8 +353,8 @@ class IFCPathScenarioWindow(IFCPathBuilder3DWindow):
         self._apply_scenario_to_preview()
         self._walker.speed_mps = float(self.walk_speed_spin.value())
         self._walker.set_route(route.points, running=preserve_running)
-        if preserve_running:
-            self._simulation_clock.restart()
+        if self._walker.running:
+            self._simulation_clock.start()
             self._simulation_timer.start()
         self._sync_agent_preview()
         self._update_simulation_controls()
@@ -389,11 +390,11 @@ class IFCPathScenarioWindow(IFCPathBuilder3DWindow):
                 self._calculate_route()
             elif self._route is not None:
                 self._walker.set_route(self._route.points)
-        if len(self._walker.points) < 2:
+        if self._route is None or len(self._walker.points) < 2:
             return
         self._walker.speed_mps = float(self.walk_speed_spin.value())
         self._walker.play()
-        self._simulation_clock.restart()
+        self._simulation_clock.start()
         self._simulation_timer.start()
         self._sync_agent_preview()
         self._update_simulation_controls()
@@ -460,11 +461,16 @@ class IFCPathScenarioWindow(IFCPathBuilder3DWindow):
         if not hasattr(self, "walk_play_button"):
             return
         self.walk_play_button.setText("Pause" if self._walker.running else "Walk")
-        self.walk_play_button.setEnabled(len(self._walker.points) >= 2 and not self._walker.finished)
+        self.walk_play_button.setEnabled(
+            self._route is not None and len(self._walker.points) >= 2 and not self._walker.finished
+        )
         self.walk_restart_button.setEnabled(self._start_point is not None and self._goal_point is not None)
 
         if not self._walker.points:
-            self.walk_status_label.setText("Agent: waiting for route")
+            if self._route is None and self._start_point is not None and self._goal_point is not None:
+                self.walk_status_label.setText("Agent: stopped · no valid route")
+            else:
+                self.walk_status_label.setText("Agent: waiting for route")
             return
         total = self._walker.total_length_m
         if self._walker.finished:
