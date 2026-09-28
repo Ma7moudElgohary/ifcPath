@@ -11,7 +11,8 @@ bool UIFCPathSubsystem::LoadInav(const FString& FilePath, FString& Error)
 {
     Nodes.Reset();
     Edges.Reset();
-    BlockedPortals.Reset();
+    Adjacency.Reset();
+    ClearDynamicState();
 
     FString Text;
     if (!FFileHelper::LoadFileToString(Text, *FilePath))
@@ -42,16 +43,33 @@ bool UIFCPathSubsystem::LoadInav(const FString& FilePath, FString& Error)
         {
             continue;
         }
-        const TArray<TSharedPtr<FJsonValue>>* P = nullptr;
-        if (!Obj->TryGetArrayField(TEXT("position_m"), P) || P == nullptr || P->Num() < 3)
+
+        const TArray<TSharedPtr<FJsonValue>>* Position = nullptr;
+        if (!Obj->TryGetArrayField(TEXT("position_m"), Position) || Position == nullptr || Position->Num() < 3)
         {
             continue;
         }
 
         FIFCPathNode Node;
-        Node.Id = Obj->GetStringField(TEXT("id"));
-        Node.Position = ToUnrealPosition((*P)[0]->AsNumber(), (*P)[1]->AsNumber(), (*P)[2]->AsNumber());
-        Nodes.Add(Node.Id, Node);
+        if (!Obj->TryGetStringField(TEXT("id"), Node.Id) || Node.Id.IsEmpty())
+        {
+            continue;
+        }
+        Node.Position = ToUnrealPosition(
+            (*Position)[0]->AsNumber(),
+            (*Position)[1]->AsNumber(),
+            (*Position)[2]->AsNumber());
+        Obj->TryGetStringField(TEXT("kind"), Node.Kind);
+        Obj->TryGetStringField(TEXT("level_id"), Node.LevelId);
+        Obj->TryGetStringField(TEXT("space_id"), Node.SpaceId);
+        Obj->TryGetStringField(TEXT("portal_id"), Node.PortalId);
+
+        Nodes.Add(Node.Id, MoveTemp(Node));
+    }
+
+    for (const TPair<FString, FIFCPathNode>& Pair : Nodes)
+    {
+        Adjacency.Add(Pair.Key, {});
     }
 
     const TArray<TSharedPtr<FJsonValue>>* JsonEdges = nullptr;
@@ -64,12 +82,30 @@ bool UIFCPathSubsystem::LoadInav(const FString& FilePath, FString& Error)
             {
                 continue;
             }
+
             FIFCPathEdge Edge;
-            Edge.A = Obj->GetStringField(TEXT("a"));
-            Edge.B = Obj->GetStringField(TEXT("b"));
+            if (!Obj->TryGetStringField(TEXT("a"), Edge.A)
+                || !Obj->TryGetStringField(TEXT("b"), Edge.B)
+                || !Nodes.Contains(Edge.A)
+                || !Nodes.Contains(Edge.B))
+            {
+                continue;
+            }
             Edge.DistanceMeters = Obj->GetNumberField(TEXT("distance_m"));
             Obj->TryGetStringField(TEXT("portal_id"), Edge.PortalId);
-            Edges.Add(MoveTemp(Edge));
+            Edges.Add(Edge);
+
+            FIFCPathAdjacencyEntry AB;
+            AB.NodeId = Edge.B;
+            AB.DistanceMeters = Edge.DistanceMeters;
+            AB.PortalId = Edge.PortalId;
+            Adjacency.FindChecked(Edge.A).Add(MoveTemp(AB));
+
+            FIFCPathAdjacencyEntry BA;
+            BA.NodeId = Edge.A;
+            BA.DistanceMeters = Edge.DistanceMeters;
+            BA.PortalId = Edge.PortalId;
+            Adjacency.FindChecked(Edge.B).Add(MoveTemp(BA));
         }
     }
 
@@ -77,10 +113,19 @@ bool UIFCPathSubsystem::LoadInav(const FString& FilePath, FString& Error)
     return Nodes.Num() > 0;
 }
 
-bool UIFCPathSubsystem::FindPath(const FString& StartNodeId, const FString& GoalNodeId, TArray<FVector>& OutPoints) const
+bool UIFCPathSubsystem::FindPath(
+    const FString& StartNodeId,
+    const FString& GoalNodeId,
+    TArray<FVector>& OutPoints) const
 {
     OutPoints.Reset();
     if (!Nodes.Contains(StartNodeId) || !Nodes.Contains(GoalNodeId))
+    {
+        return false;
+    }
+
+    const FIFCPathNode* GoalNode = Nodes.Find(GoalNodeId);
+    if (GoalNode != nullptr && !GoalNode->SpaceId.IsEmpty() && BlockedSpaces.Contains(GoalNode->SpaceId))
     {
         return false;
     }
@@ -118,37 +163,40 @@ bool UIFCPathSubsystem::FindPath(const FString& StartNodeId, const FString& Goal
         }
         Unvisited.Remove(Current);
 
-        for (const FIFCPathEdge& Edge : Edges)
+        const FIFCPathNode* CurrentNode = Nodes.Find(Current);
+        const TArray<FIFCPathAdjacencyEntry>* Neighbours = Adjacency.Find(Current);
+        if (CurrentNode == nullptr || Neighbours == nullptr)
         {
-            if (!Edge.PortalId.IsEmpty() && BlockedPortals.Contains(Edge.PortalId))
+            continue;
+        }
+
+        for (const FIFCPathAdjacencyEntry& Neighbour : *Neighbours)
+        {
+            if (!Neighbour.PortalId.IsEmpty() && BlockedPortals.Contains(Neighbour.PortalId))
+            {
+                continue;
+            }
+            if (!Unvisited.Contains(Neighbour.NodeId))
             {
                 continue;
             }
 
-            FString Next;
-            if (Edge.A == Current)
+            const FIFCPathNode* NextNode = Nodes.Find(Neighbour.NodeId);
+            if (NextNode == nullptr)
             {
-                Next = Edge.B;
+                continue;
             }
-            else if (Edge.B == Current)
-            {
-                Next = Edge.A;
-            }
-            else
+            if (!NextNode->SpaceId.IsEmpty() && BlockedSpaces.Contains(NextNode->SpaceId))
             {
                 continue;
             }
 
-            if (!Unvisited.Contains(Next))
+            const double CandidateDist = Best
+                + Neighbour.DistanceMeters * GetTraversalMultiplier(*CurrentNode, *NextNode);
+            if (CandidateDist < Dist.FindRef(Neighbour.NodeId))
             {
-                continue;
-            }
-
-            const double CandidateDist = Best + Edge.DistanceMeters;
-            if (CandidateDist < Dist.FindRef(Next))
-            {
-                Dist[Next] = CandidateDist;
-                Prev.Add(Next, Current);
+                Dist[Neighbour.NodeId] = CandidateDist;
+                Prev.Add(Neighbour.NodeId, Current);
             }
         }
     }
@@ -200,6 +248,11 @@ bool UIFCPathSubsystem::FindNearestNode(
     const FIFCPathNode* BestNode = nullptr;
     for (const TPair<FString, FIFCPathNode>& Pair : Nodes)
     {
+        if (!Pair.Value.SpaceId.IsEmpty() && BlockedSpaces.Contains(Pair.Value.SpaceId))
+        {
+            continue;
+        }
+
         const double DistanceSquared = FVector::DistSquared(WorldPosition, Pair.Value.Position);
         if (DistanceSquared <= BestDistanceSquared)
         {
@@ -251,6 +304,61 @@ void UIFCPathSubsystem::SetPortalBlocked(const FString& PortalId, bool bBlocked)
     }
 }
 
+void UIFCPathSubsystem::SetSpaceBlocked(const FString& SpaceId, bool bBlocked)
+{
+    if (SpaceId.IsEmpty())
+    {
+        return;
+    }
+    if (bBlocked)
+    {
+        BlockedSpaces.Add(SpaceId);
+    }
+    else
+    {
+        BlockedSpaces.Remove(SpaceId);
+    }
+}
+
+void UIFCPathSubsystem::SetSpaceCostMultiplier(const FString& SpaceId, float CostMultiplier)
+{
+    if (SpaceId.IsEmpty())
+    {
+        return;
+    }
+
+    const double Value = FMath::Max(0.01, static_cast<double>(CostMultiplier));
+    if (FMath::IsNearlyEqual(Value, 1.0))
+    {
+        SpaceCostMultipliers.Remove(SpaceId);
+    }
+    else
+    {
+        SpaceCostMultipliers.Add(SpaceId, Value);
+    }
+}
+
+void UIFCPathSubsystem::ClearDynamicState()
+{
+    BlockedPortals.Reset();
+    BlockedSpaces.Reset();
+    SpaceCostMultipliers.Reset();
+}
+
+bool UIFCPathSubsystem::IsSpaceBlocked(const FString& SpaceId) const
+{
+    return BlockedSpaces.Contains(SpaceId);
+}
+
+float UIFCPathSubsystem::GetSpaceCostMultiplier(const FString& SpaceId) const
+{
+    if (const double* Value = SpaceCostMultipliers.Find(SpaceId))
+    {
+        return static_cast<float>(*Value);
+    }
+    return 1.0f;
+}
+
 void UIFCPathSubsystem::DrawDebugPath(
     const TArray<FVector>& Points,
     FLinearColor Color,
@@ -287,10 +395,44 @@ void UIFCPathSubsystem::DrawDebugGraph(FLinearColor Color, float Thickness, floa
         {
             continue;
         }
-        const bool bBlocked = !Edge.PortalId.IsEmpty() && BlockedPortals.Contains(Edge.PortalId);
-        const FColor EdgeColor = bBlocked ? FColor::Red : DrawColor;
+
+        const bool bPortalBlocked = !Edge.PortalId.IsEmpty() && BlockedPortals.Contains(Edge.PortalId);
+        const bool bSpaceBlocked = (!A->SpaceId.IsEmpty() && BlockedSpaces.Contains(A->SpaceId))
+            || (!B->SpaceId.IsEmpty() && BlockedSpaces.Contains(B->SpaceId));
+        const bool bPenalized = GetTraversalMultiplier(*A, *B) > 1.0;
+
+        FColor EdgeColor = DrawColor;
+        if (bPortalBlocked || bSpaceBlocked)
+        {
+            EdgeColor = FColor::Red;
+        }
+        else if (bPenalized)
+        {
+            EdgeColor = FColor::Yellow;
+        }
+
         DrawDebugLine(World, A->Position, B->Position, EdgeColor, false, Duration, 0, Thickness);
     }
+}
+
+double UIFCPathSubsystem::GetTraversalMultiplier(const FIFCPathNode& A, const FIFCPathNode& B) const
+{
+    double Multiplier = 1.0;
+    if (!A.SpaceId.IsEmpty())
+    {
+        if (const double* Value = SpaceCostMultipliers.Find(A.SpaceId))
+        {
+            Multiplier = FMath::Max(Multiplier, *Value);
+        }
+    }
+    if (!B.SpaceId.IsEmpty())
+    {
+        if (const double* Value = SpaceCostMultipliers.Find(B.SpaceId))
+        {
+            Multiplier = FMath::Max(Multiplier, *Value);
+        }
+    }
+    return Multiplier;
 }
 
 FVector UIFCPathSubsystem::ToUnrealPosition(double X, double Y, double Z)
