@@ -1,5 +1,6 @@
 #include "IFCPathSubsystem.h"
 
+#include "Algo/Reverse.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
 #include "Serialization/JsonReader.h"
