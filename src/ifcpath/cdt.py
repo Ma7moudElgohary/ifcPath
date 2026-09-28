@@ -37,8 +37,21 @@ def prepare_space_floor(
     return floor
 
 
-def build_floor_cdt_graph(floor, z: float) -> tuple[list[Vec3], list[Edge]]:
-    """Build the triangle-dual metric graph for a prepared walkable polygon."""
+def build_floor_cdt_graph(
+    floor,
+    z: float,
+    *,
+    boundary_spacing_m: float = 1.0,
+) -> tuple[list[Vec3], list[Edge]]:
+    """Build a sparse CDT dual graph with explicit boundary anchor samples.
+
+    Triangle centroids form the internal metric network. Internal shared edges
+    connect adjacent triangle centroids. Each polygon-boundary edge additionally
+    receives one or more interior edge samples (never the vertices themselves),
+    connected to its owning triangle centroid. Those boundary anchors give
+    semantic doors/transfers a stable geometric attachment point without relying
+    on an arbitrary centroid-distance threshold.
+    """
     if floor is None or floor.is_empty:
         return [], []
 
@@ -53,6 +66,7 @@ def build_floor_cdt_graph(floor, z: float) -> tuple[list[Vec3], list[Edge]]:
 
     points: list[Vec3] = []
     edge_owners: dict[tuple[tuple[int, int], tuple[int, int]], list[int]] = defaultdict(list)
+    edge_geometry: dict[tuple[tuple[int, int], tuple[int, int]], tuple[tuple[float, float], tuple[float, float]]] = {}
     quantization = 1_000_000_000.0
 
     for triangle_index, triangle in enumerate(triangle_polygons):
@@ -65,16 +79,37 @@ def build_floor_cdt_graph(floor, z: float) -> tuple[list[Vec3], list[Edge]]:
             b = (round(end[0] * quantization), round(end[1] * quantization))
             key = (a, b) if a <= b else (b, a)
             edge_owners[key].append(triangle_index)
+            edge_geometry.setdefault(key, ((float(start[0]), float(start[1])), (float(end[0]), float(end[1]))))
 
     edges: list[Edge] = []
-    for owners in edge_owners.values():
-        if len(owners) != 2:
+    spacing = max(boundary_spacing_m, 0.1)
+    for key, owners in edge_owners.items():
+        if len(owners) == 2:
+            a, b = owners
+            segment = LineString([(points[a][0], points[a][1]), (points[b][0], points[b][1])])
+            if floor.covers(segment):
+                edges.append((a, b, distance(points[a], points[b])))
             continue
-        a, b = owners
-        segment = LineString([(points[a][0], points[a][1]), (points[b][0], points[b][1])])
-        if not floor.covers(segment):
+
+        if len(owners) != 1:
             continue
-        edges.append((a, b, distance(points[a], points[b])))
+
+        owner = owners[0]
+        start, end = edge_geometry[key]
+        length = math.dist(start, end)
+        divisions = max(1, int(math.ceil(length / spacing)))
+        for k in range(divisions):
+            # Segment midpoints avoid creating zero-width shortcuts through a
+            # polygon vertex shared only by diagonally touching cells.
+            t = (k + 0.5) / divisions
+            boundary_point = (
+                start[0] + (end[0] - start[0]) * t,
+                start[1] + (end[1] - start[1]) * t,
+                z,
+            )
+            boundary_index = len(points)
+            points.append(boundary_point)
+            edges.append((owner, boundary_index, distance(points[owner], boundary_point)))
 
     return points, edges
 
@@ -86,6 +121,7 @@ def build_space_cdt_graph(
     floor_tolerance_m: float = 0.12,
     max_slope_deg: float = 12.0,
     clearance_m: float = 0.0,
+    boundary_spacing_m: float = 1.0,
 ) -> tuple[list[Vec3], list[Edge]]:
     """Build a sparse metric graph from an IFC space floor using CDT."""
     floor = prepare_space_floor(
@@ -95,7 +131,11 @@ def build_space_cdt_graph(
         max_slope_deg=max_slope_deg,
         clearance_m=clearance_m,
     )
-    return build_floor_cdt_graph(floor, _floor_elevation(vertices))
+    return build_floor_cdt_graph(
+        floor,
+        _floor_elevation(vertices),
+        boundary_spacing_m=boundary_spacing_m,
+    )
 
 
 def space_floor_polygon(
