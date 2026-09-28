@@ -24,6 +24,10 @@ The Builder supports:
 - exact click-to-pick Start/Goal points on CDT cells;
 - hierarchical multi-space/multi-storey route calculation;
 - stitched 3D path display through doors, stairs and ramps;
+- live blocked-door and blocked-space scenarios;
+- smoke, fire and crowd route-cost scenarios;
+- automatic rerouting whenever scenario state changes;
+- a procedural low-poly 3D person agent at the route start;
 - validation diagnostics and summary metrics;
 - `.inav` export;
 - drag/drop for IFC and INAV files;
@@ -76,6 +80,21 @@ The route panel reports physical length, semantic-space count, transfer count an
 
 When opening an existing INAV without its original IFC, all navigation 3D features remain available; only the optional BIM context mesh is absent.
 
+## Live scenario editor
+
+Scenario changes are runtime-only. They are passed to `HierarchicalRouteOptions` and never mutate the canonical INAV topology.
+
+Supported controls:
+
+- select a door/portal and **Block / Unblock** it;
+- select a space and **Block / Unblock** it;
+- apply **Smoke**, **Fire**, or **Crowd** to a space with a configurable route-cost multiplier;
+- clear a selected hazard or reset the complete scenario.
+
+If Start and Goal are already selected, every scenario edit recalculates the route immediately. The 3D preview overlays blocked doors with a red cross, blocked spaces in red, and hazard spaces with type-specific shading.
+
+The person agent is generated procedurally from triangular boxes plus a faceted head. It is approximately 1.72 m tall by default, stands at the exact picked Start XYZ, and rotates toward the first non-zero route segment. It is display-only and introduces no external mesh asset or licensing dependency.
+
 ## Native desktop bundle
 
 Install build extras:
@@ -102,6 +121,8 @@ The normal test job compiles all Python sources. The `desktop-smoke` job install
 - INAV model binding;
 - projected 3D viewport rendering;
 - screen-to-CDT world-point recovery;
-- hierarchical route calculation between selected world points.
+- hierarchical route calculation between selected world points;
+- procedural person-mesh geometry and rendering;
+- live scenario state without mutating the INAV model.
 
 A Windows packaging job also builds and uploads an `IFCPathBuilder-Windows` PyInstaller artifact.
