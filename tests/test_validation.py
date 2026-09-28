@@ -1,4 +1,4 @@
-from ifcpath.model import InavModel, NavEdge, NavNode, Portal, Space
+from ifcpath.model import InavModel, NavEdge, NavNode, Portal, SemanticTransition, Space
 from ifcpath.validation import validate_model
 
 
@@ -80,3 +80,22 @@ def test_validation_requires_two_sided_portal_attachment():
 
     assert report.stats["portal_side_failures"] == 1
     assert any(issue.code == "PORTAL_MISSING_SIDE" for issue in report.issues)
+
+
+def test_validation_rejects_broken_semantic_transition_reference():
+    model = InavModel(
+        spaces=[Space(id="s1", name="Room", level_id="L1")],
+        transitions=[SemanticTransition(
+            id="t1",
+            kind="door",
+            from_space_id="s1",
+            to_space_id="missing",
+            from_level_id="L1",
+        )],
+    )
+
+    report = validate_model(model)
+
+    assert not report.valid
+    assert report.stats["semantic_transition_errors"] == 1
+    assert any(issue.code == "TRANSITION_UNKNOWN_TO_SPACE" for issue in report.issues)
