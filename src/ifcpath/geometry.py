@@ -59,25 +59,46 @@ def sample_walkable_triangles(
     return points
 
 
-def build_radius_edges(points: list[Vec3], max_distance_m: float) -> list[tuple[int, int, float]]:
-    """Spatial-hash radius graph, avoiding O(n^2) all-pairs checks."""
-    if not points or max_distance_m <= 0:
+def build_radius_edges(
+    points: list[Vec3],
+    max_distance_m: float,
+    max_neighbors: int = 8,
+) -> list[tuple[int, int, float]]:
+    """Build a sparse local graph using spatial hashing and bounded neighbours.
+
+    The original MVP connected every pair inside the radius. Real IFC
+    qualification showed that this creates hundreds of thousands of redundant
+    edges for only a few thousand nodes. Here each node nominates only its
+    nearest ``max_neighbors`` candidates inside the radius; the undirected union
+    is returned. Complexity stays local while preserving alternate routes.
+    """
+    if not points or max_distance_m <= 0 or max_neighbors <= 0:
         return []
+
     inv = 1.0 / max_distance_m
     buckets: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for i, p in enumerate(points):
         buckets[(math.floor(p[0]*inv), math.floor(p[1]*inv), math.floor(p[2]*inv))].append(i)
 
-    edges: list[tuple[int, int, float]] = []
+    selected: dict[tuple[int, int], float] = {}
     for i, p in enumerate(points):
         key = (math.floor(p[0]*inv), math.floor(p[1]*inv), math.floor(p[2]*inv))
+        candidates: list[tuple[float, int]] = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for dz in (-1, 0, 1):
                     for j in buckets.get((key[0]+dx, key[1]+dy, key[2]+dz), []):
-                        if j <= i:
+                        if j == i:
                             continue
                         d = distance(p, points[j])
-                        if d <= max_distance_m:
-                            edges.append((i, j, d))
-    return edges
+                        if 1e-9 < d <= max_distance_m:
+                            candidates.append((d, j))
+
+        candidates.sort(key=lambda item: item[0])
+        for d, j in candidates[:max_neighbors]:
+            a, b = (i, j) if i < j else (j, i)
+            current = selected.get((a, b))
+            if current is None or d < current:
+                selected[(a, b)] = d
+
+    return [(a, b, d) for (a, b), d in sorted(selected.items())]
