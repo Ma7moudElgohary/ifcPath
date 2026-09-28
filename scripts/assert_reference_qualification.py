@@ -32,15 +32,23 @@ def main() -> None:
         fail(f"too few IFC spaces extracted: {stats.get('spaces', 0)}")
     if stats.get("portals", 0) < 5:
         fail(f"too few door portals extracted: {stats.get('portals', 0)}")
-    if report.get("reachable_node_ratio", 0.0) < 0.50:
-        fail(f"largest connected component is only {report.get('reachable_node_ratio', 0.0):.1%} of nodes")
+    if stats.get("portal_side_failures", 0) != 0:
+        fail(f"{stats.get('portal_side_failures')} semantic portals are missing one or more connected sides")
+    if stats.get("isolated_nodes", 0) > 5:
+        fail(f"too many isolated navigation nodes: {stats.get('isolated_nodes')}")
+    if stats.get("exit_reachable_ratio", 0.0) < 0.80:
+        fail(
+            "too little navigation can reach a classified exit: "
+            f"{stats.get('exit_reachable_ratio', 0.0):.1%}"
+        )
 
     print("reference IFC qualification passed")
     print(
         f"nodes={nodes} edges={edges} edge_ratio={edges / max(nodes, 1):.2f} "
         f"levels={stats.get('levels')} spaces={stats.get('spaces')} "
         f"portals={stats.get('portals')} components={report.get('component_count')} "
-        f"largest_component={report.get('reachable_node_ratio', 0.0):.1%}"
+        f"exit_reachable={stats.get('exit_reachable_ratio', 0.0):.1%} "
+        f"split_spaces={stats.get('split_spaces')}"
     )
 
 
