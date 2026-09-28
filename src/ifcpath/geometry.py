@@ -25,13 +25,18 @@ def sample_walkable_triangles(
     max_slope_deg: float = 45.0,
     max_points: int = 50000,
 ) -> list[Vec3]:
-    """Topologic-Studio-inspired surface sampling, without TopologicPy dependency."""
+    """Sample upward-facing walkable surfaces.
+
+    This keeps the fast surface-sampling idea used by Topologic Studio while
+    explicitly rejecting downward slab/landing faces, which otherwise create
+    duplicate navigation layers beneath floors.
+    """
     points: list[Vec3] = []
     min_up = math.cos(math.radians(max_slope_deg))
     for ia, ib, ic in triangles:
         a, b, c = vertices[ia], vertices[ib], vertices[ic]
         n = triangle_normal(a, b, c)
-        if abs(n[2]) < min_up:
+        if n[2] < min_up:
             continue
         area2 = math.dist((0, 0, 0), (
             (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),
