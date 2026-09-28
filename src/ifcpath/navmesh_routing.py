@@ -28,17 +28,7 @@ def find_navmesh_path(
     *,
     space_id: str | None = None,
 ) -> NavMeshRoute | None:
-    """Find a locally short route through the portable CDT navmesh.
-
-    The dual graph is used only to choose a sequence of triangles. The returned
-    geometric route is then string-pulled through the shared triangle edges with
-    the funnel algorithm, avoiding the centroid-to-centroid zig-zag that a raw
-    dual-graph route would produce.
-
-    This routine is intentionally local/planar. Building-wide routing first uses
-    semantic transitions to choose spaces/transfers and then applies this metric
-    path inside each CDT-backed space.
-    """
+    """Find a locally short route through the portable CDT navmesh."""
     candidate_cells = [
         cell for cell in model.cells
         if space_id is None or cell.space_id == space_id
@@ -125,8 +115,8 @@ def _cell_corridor(
 
 
 def _shared_edge(a: NavCell, b: NavCell) -> tuple[Vec3, Vec3] | None:
-    a_by_key = {_xy_key(vertex): vertex for vertex in a.vertices_m}
-    common = [a_by_key[key] for key in a_by_key if key in {_xy_key(v) for v in b.vertices_m}]
+    b_keys = {_xy_key(v) for v in b.vertices_m}
+    common = [vertex for vertex in a.vertices_m if _xy_key(vertex) in b_keys]
     if len(common) != 2:
         return None
     return common[0], common[1]
@@ -137,7 +127,14 @@ def _oriented_portal(
     nxt: NavCell,
     shared: tuple[Vec3, Vec3],
 ) -> tuple[Vec3, Vec3]:
-    """Return shared edge endpoints ordered as (left, right) along travel."""
+    """Return shared edge endpoints in the funnel algorithm's left/right order.
+
+    The standard simple-stupid funnel implementation assumes a portal winding
+    convention opposite to the intuitive positive-cross "left of travel"
+    classification. Keeping that convention explicit is critical: reversing it
+    causes string pulling to select the outer polygon corners instead of the taut
+    path around an obstacle.
+    """
     a, b = shared
     current_center = _centroid(current)
     next_center = _centroid(nxt)
@@ -146,7 +143,7 @@ def _oriented_portal(
     midpoint = ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5)
     cross_a = dx * (a[1] - midpoint[1]) - dy * (a[0] - midpoint[0])
     cross_b = dx * (b[1] - midpoint[1]) - dy * (b[0] - midpoint[0])
-    return (a, b) if cross_a >= cross_b else (b, a)
+    return (b, a) if cross_a >= cross_b else (a, b)
 
 
 def _string_pull(portals: list[tuple[Vec3, Vec3]]) -> list[Vec3]:
@@ -166,7 +163,6 @@ def _string_pull(portals: list[tuple[Vec3, Vec3]]) -> list[Vec3]:
     while i < len(portals):
         new_left, new_right = portals[i]
 
-        # Tighten the right side.
         if _triarea2(apex, right, new_right) <= _EPSILON:
             if _vequal(apex, right) or _triarea2(apex, left, new_right) > _EPSILON:
                 right = new_right
@@ -182,7 +178,6 @@ def _string_pull(portals: list[tuple[Vec3, Vec3]]) -> list[Vec3]:
                 i = apex_index + 1
                 continue
 
-        # Tighten the left side.
         if _triarea2(apex, left, new_left) >= -_EPSILON:
             if _vequal(apex, left) or _triarea2(apex, right, new_left) < -_EPSILON:
                 left = new_left
