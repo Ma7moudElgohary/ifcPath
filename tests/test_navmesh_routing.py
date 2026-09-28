@@ -59,7 +59,7 @@ def test_funnel_matches_known_shortest_detour_around_rectangular_obstacle():
     assert len(route.points) == 4
 
 
-def test_funnel_route_is_materially_shorter_than_centroid_chain():
+def test_funnel_matches_second_known_obstacle_detour():
     floor = Polygon(
         [(0.0, 0.0), (12.0, 0.0), (12.0, 6.0), (0.0, 6.0)],
         holes=[[(5.0, 1.0), (7.0, 1.0), (7.0, 5.0), (5.0, 5.0)]],
@@ -81,6 +81,7 @@ def test_funnel_route_is_materially_shorter_than_centroid_chain():
     route = find_navmesh_path(model, start, goal, space_id="space:test")
 
     assert route is not None
-    # Known optimum around either side of the obstacle.
-    expected = 2.0 * math.sqrt(17.0) + 2.0
-    assert route.length_m <= expected * 1.000001
+    # The shortest route touches either (5,1)/(7,1) or (5,5)/(7,5):
+    # 2 * sqrt(4^2 + 2^2) + 2.
+    expected = 2.0 * math.sqrt(20.0) + 2.0
+    assert abs(route.length_m - expected) < 1e-6
