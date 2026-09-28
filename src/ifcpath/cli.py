@@ -17,7 +17,17 @@ def main() -> None:
     build.add_argument("ifc")
     build.add_argument("-o", "--output", required=True)
     build.add_argument("--floor-backend", choices=("cdt", "sampled"), default="cdt")
-    build.add_argument("--agent-clearance", type=float, default=0.0, help="Shrink CDT walkable polygons by this clearance in metres")
+    build.add_argument("--agent-clearance", type=float, default=0.0, help="Shrink CDT walkable free space by this horizontal clearance in metres")
+    build.add_argument("--agent-height", type=float, default=1.8, help="Pedestrian height used to reject overhead obstacles (metres)")
+    build.add_argument(
+        "--obstacle-class",
+        action="append",
+        default=None,
+        help=(
+            "IFC class to subtract as a fixed obstacle; repeat for multiple classes. "
+            "Defaults to IfcColumn only."
+        ),
+    )
     build.add_argument("--floor-spacing", type=float, default=0.8)
     build.add_argument("--stair-spacing", type=float, default=0.25)
     build.add_argument("--connect-distance", type=float, default=1.25)
@@ -30,11 +40,14 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "build":
+        obstacle_classes = tuple(args.obstacle_class) if args.obstacle_class else ("IfcColumn",)
         model = build_from_ifc(
             args.ifc,
             BuildOptions(
                 floor_backend=args.floor_backend,
                 agent_clearance_m=max(0.0, args.agent_clearance),
+                agent_height_m=max(0.0, args.agent_height),
+                fixed_obstacle_classes=obstacle_classes,
                 floor_spacing_m=args.floor_spacing,
                 stair_spacing_m=args.stair_spacing,
                 connect_distance_m=args.connect_distance,
