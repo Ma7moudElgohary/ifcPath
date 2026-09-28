@@ -7,54 +7,85 @@ IFCPath converts BIM/IFC models into a portable indoor-navigation model for Digi
 ```text
 IFC
  ↓
-IfcOpenShell
+IfcOpenShell semantics + world geometry
  ↓
-IfcSpace floor geometry + stairs / ramps
- ↓
-Sparse semantic navigation graph
- + doors / exits / levels
- ↓
-.inav (portable JSON)
- ↓
-Unreal Engine first, other consumers later
+┌──────────────────────────────┬──────────────────────────────┐
+│ semantic connectivity       │ metric movement geometry      │
+│ IfcSpace / boundaries       │ IfcSpace bottom polygon       │
+│ doors / vertical transfers  │ fixed-obstacle subtraction    │
+│ Space ↔ Transition ↔ Space  │ clearance erosion             │
+│                              │ constrained Delaunay cells     │
+└──────────────┬───────────────┴──────────────┬───────────────┘
+               └───────────────┬──────────────┘
+                               ↓
+                         portable .inav
+                               ↓
+                     Unreal / other targets
 ```
 
-The production core intentionally does **not** depend on TopologicPy. The first implementation adopts the useful ideas demonstrated by Topologic Studio—walkable sampling, stair handling, semantic door waypoints, and graph routing—while keeping IFCPath permissive and engine-independent.
+The production core does **not** depend on Pathfinder or TopologicPy. The implementation is grounded in published IFC indoor-navigation work; see [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
 ## Current capabilities
 
-### Generator
+### BIM / generator
 
-- IFC storeys, spaces, slabs, ramps, stairs and doors via IfcOpenShell.
+- IFC storeys, `IfcSpace`, doors, stairs and ramps via IfcOpenShell.
+- `IfcRelSpaceBoundary*` preferred for door↔space topology; geometry inference is fallback.
 - Actual bottom surfaces of `IfcSpace` are the primary walkable source.
-- Slab sampling remains a fallback for IFCs without usable space geometry.
-- Sparse spatial-hash / bounded-neighbour graph generation.
-- Doors are semantic portals between IFC spaces.
-- Explicit `IfcRelSpaceBoundary*` data is preferred over geometry inference.
-- Cross-space movement goes through portals rather than direct radius edges.
-- Level-aware projected wall obstacles are available as a fallback for unassigned geometry.
-- Portable `.inav` JSON containing levels, spaces, portals, nodes, edges and metadata.
+- Fixed IFC obstacles are subtracted before navigation generation (`IfcColumn` by default).
+- Configurable pedestrian clearance and height.
+- Constrained Delaunay triangulation (CDT) is the default floor backend.
+- Sampled graph backend remains available for malformed IFC geometry.
+- Explicit vertical semantic transitions inferred from stair/ramp landing contacts.
 
-### Qualification
+### Portable INAV 0.3
 
-- Connected components and isolated nodes.
-- Invalid/missing edge references.
-- Unknown/disconnected portals.
-- Two-sided semantic door attachment (`PORTAL_MISSING_SIDE`).
-- Spaces and levels without navigation.
-- Split-space diagnostics.
-- Exit reachability counts and ratio.
-- Graph-density gates for real IFC qualification.
-- Continuous qualification against a real buildingSMART Duplex IFC fixture.
+INAV contains both semantic and metric representations:
 
-### Runtime routing
+- levels;
+- spaces;
+- portals/exits;
+- semantic transitions (`Space ↔ Door/Stair/Ramp ↔ Space`);
+- triangular navmesh cells with reciprocal neighbours;
+- metric nodes/edges for backward-compatible graph routing;
+- node→cell identity;
+- metadata / generator settings.
 
-- Dijkstra routing.
-- Blocked doors/portals.
-- Blocked BIM spaces.
-- Per-space cost multipliers for smoke, crowd density, security or other risk state.
-- An occupant already inside a newly blocked space may still route outward; blocked spaces are treated as **no-entry**, not as traps.
-- Node-level hazard costs are also supported by the standalone Python core.
+This separation lets target software perform hierarchical routing rather than treating a building as one anonymous point cloud.
+
+### Metric route accuracy
+
+The Python core supports a navmesh route:
+
+```text
+start / goal
+ ↓
+find containing CDT cells
+ ↓
+cell corridor
+ ↓
+shared cell edges (portals)
+ ↓
+funnel / string pulling
+ ↓
+short geometric path
+```
+
+Quantitative tests require:
+
+- an open rectangular room to reduce exactly to the straight Euclidean segment;
+- known rectangular-obstacle examples to match their analytic shortest detour lengths.
+
+The old centroid graph therefore remains a connectivity/search representation, not the final visible path geometry.
+
+### Dynamic Digital Twin routing
+
+Runtime state is kept separate from BIM preprocessing:
+
+- blocked door / portal;
+- blocked BIM space;
+- per-space cost multiplier for smoke, crowd density, security or other risk;
+- occupants already inside a newly blocked space can still escape; it is treated as **no-entry**, not a trap.
 
 ## Generate INAV
 
@@ -63,81 +94,53 @@ python -m pip install -e ".[test]"
 ifcpath build Building.ifc -o Building.inav
 ```
 
-Useful tuning parameters:
+Useful options:
 
 ```bash
 ifcpath build Building.ifc -o Building.inav \
-  --floor-spacing 0.8 \
+  --floor-backend cdt \
+  --agent-clearance 0.30 \
+  --agent-height 1.80 \
+  --obstacle-class IfcColumn \
   --stair-spacing 0.25 \
   --connect-distance 1.25
 ```
 
-For automated qualification:
+`--obstacle-class` may be repeated. Furniture is deliberately not treated as fixed by default because IFC files often mix movable and built-in objects.
 
-```bash
-ifcpath build Building.ifc -o Building.inav --strict
-```
-
-## Validate a generated model
+Validate a generated model:
 
 ```bash
 ifcpath validate Building.inav
-```
-
-Machine-readable output:
-
-```bash
 ifcpath validate Building.inav --json
 ```
-
-To make warnings fail a CI gate:
-
-```bash
-ifcpath validate Building.inav --warnings-as-errors
-```
-
-## INAV principle
-
-INAV exports the **navigation network**, not one precomputed route. The same BIM-derived model can therefore respond to changing Digital Twin state:
-
-```text
-Door locked
-   ↓
-SetPortalBlocked
-   ↓
-reroute
-
-Fire / unsafe room
-   ↓
-SetSpaceBlocked
-   ↓
-no new route may enter that room
-   ↓
-occupants already inside can still escape
-
-Smoke / congestion
-   ↓
-SetSpaceCostMultiplier (for example 5x)
-   ↓
-route prefers a safer / less crowded alternative
-```
-
-This keeps static BIM preprocessing separate from live operational state.
 
 ## Unreal Engine
 
 Copy `Unreal/IFCPath` into your Unreal project's `Plugins` directory and rebuild.
 
-`UIFCPathSubsystem` exposes Blueprint-callable operations:
+`UIFCPathSubsystem` exposes Blueprint-callable operations.
 
-### Load / query
+### Existing building-wide graph routing
 
 - `LoadInav(FilePath)`
 - `FindPath(StartNodeId, GoalNodeId)`
 - `FindNearestNode(WorldPosition, MaxDistanceCm)`
 - `FindPathFromWorldPositions(StartWorldPosition, GoalWorldPosition, MaxSnapDistanceCm)`
 
-### Dynamic Digital Twin state
+This pathfinder supports dynamic door/space state and remains the fallback for cross-space and non-CDT segments.
+
+### Accurate CDT local routing
+
+- `FindNavMeshPathFromWorldPositions(StartWorldPosition, GoalWorldPosition)`
+- `GetCellCount()`
+- `DrawDebugNavMesh(Color, Thickness, Duration)`
+
+`FindNavMeshPathFromWorldPositions` is intentionally local to a single CDT-backed IFC space. It finds the triangle corridor and runs the same funnel/string-pulling algorithm as the quantitatively tested Python reference instead of returning a centroid zig-zag.
+
+The importer compensates for the IFC→Unreal Y-axis mirror when evaluating 2D orientation, so the funnel winding remains consistent after converting from right-handed IFC coordinates to Unreal centimetres.
+
+### Dynamic state
 
 - `SetPortalBlocked(PortalId, Blocked)`
 - `SetSpaceBlocked(SpaceId, Blocked)`
@@ -150,71 +153,36 @@ Copy `Unreal/IFCPath` into your Unreal project's `Plugins` directory and rebuild
 
 - `DrawDebugPath(Points, Color, Thickness, Duration)`
 - `DrawDebugGraph(Color, Thickness, Duration)`
+- `DrawDebugNavMesh(Color, Thickness, Duration)`
 
-Debug graph colors use:
-
-- requested graph color: normal navigation;
-- **red**: blocked portal / blocked space;
-- **yellow**: penalized space due to a cost multiplier.
-
-The Unreal importer builds a bidirectional adjacency cache once during `LoadInav`, so route queries no longer scan the entire edge array for every visited node.
-
-Typical prototype workflow:
-
-```text
-click / actor world position
-        ↓
-FindPathFromWorldPositions
-        ↓
-route
-        ↓
-DrawDebugPath
-
-IoT / simulation event
-        ↓
-SetPortalBlocked / SetSpaceBlocked / SetSpaceCostMultiplier
-        ↓
-FindPathFromWorldPositions again
-        ↓
-new route
-```
+Graph debug colors use red for blocked state and yellow for penalized spaces.
 
 ## Real IFC qualification
 
-The buildingSMART Duplex reference is downloaded during CI and processed end-to-end:
+CI downloads and processes the buildingSMART Duplex reference end-to-end.
 
-```text
-real IFC
- ↓
-IfcOpenShell
- ↓
-IFCPath generator
- ↓
-INAV
- ↓
-validator
-```
+Current qualified baseline after the research-backed geometry/topology work:
 
-The qualification gate has already exposed and driven fixes for graph density, semantic space ownership, storey assignment, door-side connectivity and wall handling. Generated INAV/report files are kept as workflow artifacts for diagnosis.
-
-Current Duplex baseline is approximately:
-
-- 1,976 navigation nodes;
-- 8,507 edges (~4.31 edges/node);
-- 4 storeys;
+- 2,378 metric nodes;
+- 10,235 edges (~4.30 edges/node);
 - 21 spaces;
-- 14 door portals / 4 candidate exits;
-- 0 semantic portal-side failures;
-- 1 isolated node;
-- 84.8% of nodes connected to a classified exit component.
+- 14 door portals / 4 classified exits;
+- 16 semantic transitions (including 2 inferred vertical transfers);
+- 110 portable CDT navmesh cells covering all 21 CDT spaces;
+- 0 split spaces;
+- 0 isolated nodes;
+- 0 portal-side failures;
+- 0 semantic-transition errors;
+- 97.8% of metric nodes connected to a classified-exit component.
 
-Split-space warnings remain intentionally visible and are the next geometry-hardening target.
+The real-IFC gate also validates navmesh cell IDs, nondegenerate triangles, reciprocal cell adjacency, cell space/level consistency and node→cell references.
 
-## Next hardening work
+## Research-driven roadmap
 
-1. Add an IFC4 reference fixture in addition to the IFC2x3 Duplex.
-2. Improve exit classification with IFC properties and exterior-boundary semantics.
-3. Resolve split-space floor regions or introduce a Recast backend where real fixtures justify it.
-4. Add stair/landing-specific topology validation.
-5. Add an Unreal build/automation runner so the C++ plugin is compiled in CI.
-6. Replace debug lines with a reusable spline/Niagara route visualization actor for presentation-quality Digital Twin UI.
+1. Stitch semantic building routes with local funnel paths so cross-room Unreal routes use accurate geometry end-to-end.
+2. Add an IFC4 fixture matrix with atria, multiple stairs, ramps, elevators and narrow doors.
+3. Improve exterior/exit classification using IFC boundary semantics and properties.
+4. Add route-profile constraints (wheelchair, responder, security, maintenance).
+5. Add real OD-pair/reference-path length benchmarks in addition to synthetic analytic tests.
+6. Add an Unreal build/automation runner so the C++ plugin itself is compiled in CI.
+7. Replace debug lines with a reusable spline/Niagara route presentation layer.
