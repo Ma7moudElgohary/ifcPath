@@ -144,16 +144,17 @@ class KinematicLocalMotionBackend:
 
 
 class JuPedSimLocalMotionBackend:
-    """JuPedSim operational-model adapter for one IFC navigation level.
+    """JuPedSim adapter for one connected IFCPath horizontal motion domain.
 
     The adapter intentionally uses a JuPedSim direct-steering stage. IFCPath owns
     route choice and continuously supplies local targets; JuPedSim owns collision
-    avoidance and pedestrian interaction inside the continuous walkable floor
-    geometry reconstructed from IFCPath CDT cells.
+    avoidance and pedestrian interaction inside the supplied walkable domain.
 
-    One backend instance represents one horizontal navigation level. Vertical
-    transitions (stairs/ramps/elevators) remain IFCPath semantic transitions and
-    can hand an agent between level backends in a higher-level hybrid controller.
+    ``space_id`` is optional for standalone/legacy level-local use. The hybrid
+    building-wide coordinator supplies it deliberately, because JuPedSim requires
+    one connected accessible area and semantic spaces separated by walls can be
+    disconnected even when they share the same storey. Doors/openings are handled
+    as IFCPath-owned transfer gates between those microscopic domains.
     """
 
     name = "jupedsim"
@@ -163,15 +164,28 @@ class JuPedSimLocalMotionBackend:
         model: InavModel,
         level_id: str,
         *,
+        space_id: str | None = None,
         config: MicroscopicMotionConfig | None = None,
     ) -> None:
         self.model = model
         self.level_id = level_id
+        self.space_id = space_id
         self.config = config or MicroscopicMotionConfig()
         if self.config.dt_s <= 0.0:
             raise ValueError("microscopic dt_s must be > 0")
 
-        self.walkable_geometry = build_level_walkable_geometry(model, level_id)
+        self.walkable_geometry = build_level_walkable_geometry(
+            model,
+            level_id,
+            space_id=space_id,
+        )
+        if _geometry_component_count(self.walkable_geometry) > 1:
+            domain = f"space {space_id!r}" if space_id else f"level {level_id!r}"
+            raise ValueError(
+                f"JuPedSim accessible area for {domain} is disconnected; "
+                "use a connected semantic motion domain"
+            )
+
         self._jps = _load_jupedsim()
         operational_model = _create_jupedsim_model(self._jps, self.config.model)
         self._simulation = self._jps.Simulation(
@@ -228,12 +242,13 @@ class JuPedSimLocalMotionBackend:
         self._z_by_agent[spec.id] = float(spec.position_m[2])
 
     def remove_agent(self, agent_id: str) -> None:
-        native_id = self._agent_ids.pop(agent_id)
+        native_id = self._agent_ids[agent_id]
         marked = bool(self._simulation.mark_agent_for_removal(native_id))
-        self._targets.pop(agent_id, None)
-        self._z_by_agent.pop(agent_id, None)
         if not marked:
             raise RuntimeError(f"JuPedSim could not mark agent {agent_id!r} for removal")
+        self._agent_ids.pop(agent_id, None)
+        self._targets.pop(agent_id, None)
+        self._z_by_agent.pop(agent_id, None)
 
     def set_target(self, agent_id: str, target_m: Vec3) -> None:
         native_id = self._agent_ids[agent_id]
@@ -275,24 +290,38 @@ class JuPedSimLocalMotionBackend:
         return [self.snapshot(agent_id) for agent_id in sorted(self._agent_ids)]
 
 
-def build_level_walkable_geometry(model: InavModel, level_id: str) -> BaseGeometry:
-    """Union IFCPath CDT triangles into JuPedSim-compatible 2D floor geometry."""
+def build_level_walkable_geometry(
+    model: InavModel,
+    level_id: str,
+    *,
+    space_id: str | None = None,
+) -> BaseGeometry:
+    """Union IFCPath CDT triangles into a continuous 2D motion domain.
+
+    With ``space_id=None`` this preserves the original whole-level helper used by
+    standalone tests/consumers. Hybrid JuPedSim mode supplies a semantic space ID
+    so walls and blocked portals remain hard motion-domain boundaries.
+    """
     triangles: list[Polygon] = []
     for cell in model.cells:
         if cell.level_id != level_id:
+            continue
+        if space_id is not None and cell.space_id != space_id:
             continue
         coordinates = [(float(vertex[0]), float(vertex[1])) for vertex in cell.vertices_m]
         polygon = Polygon(coordinates)
         if not polygon.is_empty and polygon.area > _EPSILON:
             triangles.append(polygon)
     if not triangles:
-        raise ValueError(f"level {level_id!r} has no walkable navigation cells")
+        domain = f"space {space_id!r} on level {level_id!r}" if space_id else f"level {level_id!r}"
+        raise ValueError(f"{domain} has no walkable navigation cells")
 
     geometry = unary_union(triangles)
     if not geometry.is_valid:
         geometry = geometry.buffer(0)
     if geometry.is_empty or geometry.area <= _EPSILON:
-        raise ValueError(f"level {level_id!r} produced empty walkable geometry")
+        domain = f"space {space_id!r} on level {level_id!r}" if space_id else f"level {level_id!r}"
+        raise ValueError(f"{domain} produced empty walkable geometry")
     return geometry
 
 
@@ -301,6 +330,7 @@ def create_local_motion_backend(
     *,
     model: InavModel | None = None,
     level_id: str | None = None,
+    space_id: str | None = None,
     config: MicroscopicMotionConfig | None = None,
 ) -> LocalMotionBackend:
     """Create a local-motion backend without leaking solver imports to callers."""
@@ -310,7 +340,12 @@ def create_local_motion_backend(
     if normalized in {"jupedsim", "jps", "microscopic"}:
         if model is None or not level_id:
             raise ValueError("JuPedSim backend requires model and level_id")
-        return JuPedSimLocalMotionBackend(model, level_id, config=config)
+        return JuPedSimLocalMotionBackend(
+            model,
+            level_id,
+            space_id=space_id,
+            config=config,
+        )
     raise ValueError(f"unknown local-motion backend: {name}")
 
 
@@ -350,6 +385,13 @@ def _load_jupedsim():
             "JuPedSim backend is optional; install IFCPath with the 'microscopic' extra"
         ) from exc
     return jps
+
+
+def _geometry_component_count(geometry: BaseGeometry) -> int:
+    geoms = getattr(geometry, "geoms", None)
+    if geoms is None:
+        return 1
+    return sum(1 for part in geoms if not part.is_empty and part.area > _EPSILON)
 
 
 def _project_xy_inside(
