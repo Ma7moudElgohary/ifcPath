@@ -19,16 +19,15 @@ from .microscopic_route import MicroscopicRouteConfig, MicroscopicRouteControlle
 from .model import InavModel, Vec3
 
 _EPSILON = 1e-9
-_VERTICAL_KINDS = {"stair", "ramp", "elevator", "escalator", "vertical"}
 
 
 @dataclass(frozen=True, slots=True)
 class HybridEvacuationConfig:
     """Settings for hybrid building-wide microscopic evacuation.
 
-    Horizontal motion is delegated to one local-motion backend per IFC level.
-    IFCPath keeps ownership of semantic transitions, bottleneck queues and exact
-    3D stair/ramp/elevator transfer paths.
+    Horizontal motion inside semantic spaces is delegated to one local-motion
+    backend per IFC level. IFCPath keeps ownership of semantic transitions,
+    bottleneck queues and the exact transition polylines between spaces/levels.
     """
 
     local_backend: str = "kinematic"
@@ -46,6 +45,7 @@ class HybridRouteStep:
     gate: RouteGate | None = None
     speed_factor: float = 1.0
     transition_id: str | None = None
+    transition_kind: str | None = None
 
 
 @dataclass(slots=True)
@@ -61,17 +61,25 @@ class HybridEvacuationAgentState:
     waiting_time_s: float = 0.0
     evacuated_at_s: float | None = None
     active_level_id: str | None = None
-    vertical_walker: RouteWalker | None = None
+    transfer_walker: RouteWalker | None = None
 
 
 class HybridEvacuationSimulator:
     """Building-wide evacuation with level-local microscopic motion.
 
     IFCPath remains the strategic/tactical authority. It selects hierarchical
-    routes and exits, applies runtime blocked/hazard state, and enforces semantic
-    transition capacities. Horizontal pedestrian interaction is handled by a
-    shared local-motion backend for each level. Vertical transitions are advanced
-    on their actual 3D IFCPath polyline and then handed to the destination level.
+    routes and exits, applies runtime blocked/hazard state and enforces semantic
+    transition capacities. Pedestrian interaction inside a horizontal semantic
+    space is handled by a shared local-motion backend for the active level.
+
+    Every semantic transition is an explicit handoff:
+
+    local solver -> capacity gate -> IFCPath transfer polyline -> local solver
+
+    This is important even for a same-floor door because two room CDT domains may
+    be separated by wall thickness. A 2D crowd solver must not be asked to jump a
+    non-walkable semantic gap. Stairs/ramps/elevators use the same transfer state
+    but retain their actual 3D route and configured vertical speed factor.
 
     ``local_backend='kinematic'`` is the dependency-free deterministic fallback.
     ``local_backend='jupedsim'`` uses the optional JuPedSim operational backend.
@@ -150,7 +158,7 @@ class HybridEvacuationSimulator:
         active = [
             state
             for state in states
-            if state.status in {"moving", "vertical", "waiting"}
+            if state.status in {"moving", "transfer", "waiting"}
         ]
         times = [state.evacuated_at_s for state in evacuated if state.evacuated_at_s is not None]
         clearance = None
@@ -216,7 +224,7 @@ class HybridEvacuationSimulator:
             state.step_index = 0
             state.waiting_gate_id = None
             state.active_level_id = None
-            state.vertical_walker = None
+            state.transfer_walker = None
             if plan is None:
                 state.status = "trapped"
                 continue
@@ -257,8 +265,8 @@ class HybridEvacuationSimulator:
                 continue
             if state.status == "moving":
                 self._update_horizontal_state(state)
-            elif state.status == "vertical":
-                self._update_vertical_state(state, dt)
+            elif state.status == "transfer":
+                self._update_transfer_state(state, dt)
 
         self.elapsed_s += dt
 
@@ -279,12 +287,12 @@ class HybridEvacuationSimulator:
         state.step_index += 1
         self._start_current_step(state)
 
-    def _update_vertical_state(
+    def _update_transfer_state(
         self,
         state: HybridEvacuationAgentState,
         dt: float,
     ) -> None:
-        walker = state.vertical_walker
+        walker = state.transfer_walker
         if walker is None:
             state.status = "trapped"
             return
@@ -295,7 +303,7 @@ class HybridEvacuationSimulator:
         if not walker.finished:
             return
 
-        state.vertical_walker = None
+        state.transfer_walker = None
         state.step_index += 1
         self._start_current_step(state)
 
@@ -330,7 +338,7 @@ class HybridEvacuationSimulator:
                 state.status = "moving"
                 return
 
-            if step.kind == "vertical":
+            if step.kind == "transfer":
                 route_points = _route_from_position(state.position, step.points)
                 if polyline_length(route_points) <= _EPSILON:
                     if route_points:
@@ -342,8 +350,8 @@ class HybridEvacuationSimulator:
                 )
                 walker.set_route(route_points, running=True)
                 walker.play()
-                state.vertical_walker = walker
-                state.status = "vertical"
+                state.transfer_walker = walker
+                state.status = "transfer"
                 return
 
             raise ValueError(f"unknown hybrid evacuation step kind: {step.kind}")
@@ -418,7 +426,13 @@ def compile_hybrid_route_steps(
     plan: EvacuationPlan,
     config: EvacuationConfig,
 ) -> list[HybridRouteStep]:
-    """Convert a hierarchical route into level, gate and vertical execution steps."""
+    """Compile route segments into local movement, gates and semantic handoffs.
+
+    Any segment carrying ``transition_id`` is kept out of the local-motion solver.
+    That includes same-floor doors/openings as well as true vertical circulation.
+    The transition gate is serviced first, then IFCPath advances the exact transfer
+    polyline, then the agent is inserted into the destination local solver.
+    """
     transition_gates: dict[str, RouteGate] = {}
     exit_gate: RouteGate | None = None
     for gate in plan.gates:
@@ -440,31 +454,32 @@ def compile_hybrid_route_steps(
                     kind="gate",
                     gate=gate,
                     transition_id=segment.transition_id,
+                    transition_kind=segment.kind,
                 )
             )
+            if segment.points:
+                steps.append(
+                    HybridRouteStep(
+                        kind="transfer",
+                        points=tuple(_vec3(point) for point in segment.points),
+                        speed_factor=_segment_speed_factor(segment.kind, config),
+                        transition_id=segment.transition_id,
+                        transition_kind=segment.kind,
+                    )
+                )
+            continue
 
         if not segment.points:
             continue
-        if _is_vertical(segment):
-            steps.append(
-                HybridRouteStep(
-                    kind="vertical",
-                    points=tuple(_vec3(point) for point in segment.points),
-                    speed_factor=_segment_speed_factor(segment.kind, config),
-                    transition_id=segment.transition_id,
-                )
+        level_id = _segment_level_id(model, segment)
+        steps.append(
+            HybridRouteStep(
+                kind="level",
+                points=tuple(_vec3(point) for point in segment.points),
+                level_id=level_id,
+                speed_factor=1.0,
             )
-        else:
-            level_id = _segment_level_id(model, segment)
-            steps.append(
-                HybridRouteStep(
-                    kind="level",
-                    points=tuple(_vec3(point) for point in segment.points),
-                    level_id=level_id,
-                    speed_factor=1.0,
-                    transition_id=segment.transition_id,
-                )
-            )
+        )
 
     if exit_gate is None:
         raise ValueError("hybrid evacuation plan has no exit gate")
@@ -482,15 +497,6 @@ def _segment_level_id(model: InavModel, segment: HierarchicalRouteSegment) -> st
         if model.levels:
             return min(model.levels, key=lambda level: abs(level.elevation_m - z)).id
     return None
-
-
-def _is_vertical(segment: HierarchicalRouteSegment) -> bool:
-    if segment.kind.lower() in _VERTICAL_KINDS:
-        return True
-    if len(segment.points) < 2:
-        return False
-    z_values = [point[2] for point in segment.points]
-    return max(z_values) - min(z_values) > 0.25
 
 
 def _segment_speed_factor(kind: str, config: EvacuationConfig) -> float:
