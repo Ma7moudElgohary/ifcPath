@@ -6,6 +6,7 @@ from pathlib import Path
 import ifcopenshell
 import ifcopenshell.geom
 
+from .cdt import build_space_cdt_graph
 from .geometry import build_radius_edges, sample_space_floor_triangles, sample_walkable_triangles
 from .model import InavModel, Level, NavEdge, NavNode, Portal, Space
 from .obstacles import edge_crosses_obstacle, wall_obstacle_from_vertices
@@ -18,10 +19,15 @@ class BuildOptions:
     connect_distance_m: float = 1.25
     portal_connect_distance_m: float = 2.5
     max_slope_deg: float = 50.0
+    floor_backend: str = "cdt"
+    agent_clearance_m: float = 0.0
 
 
 def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> InavModel:
     options = options or BuildOptions()
+    if options.floor_backend not in {"cdt", "sampled"}:
+        raise ValueError(f"Unsupported floor backend: {options.floor_backend}")
+
     model = ifcopenshell.open(str(path))
     out = InavModel(metadata={"source_ifc": str(path)})
 
@@ -39,7 +45,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             continue
         bbox = _bbox_from_vertices(mesh[0])
         level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
-        centroid = ((bbox[0]+bbox[3])*0.5, (bbox[1]+bbox[4])*0.5, (bbox[2]+bbox[5])*0.5)
+        centroid = ((bbox[0] + bbox[3]) * 0.5, (bbox[1] + bbox[4]) * 0.5, (bbox[2] + bbox[5]) * 0.5)
         space = Space(
             id=f"space:{entity.GlobalId}",
             name=entity.Name or getattr(entity, "LongName", None) or entity.GlobalId,
@@ -58,14 +64,44 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     point_kinds: list[str] = []
     point_levels: list[str | None] = []
     point_spaces: list[str | None] = []
+    floor_space_ids: set[str] = set()
+    cdt_space_ids: set[str] = set()
     sampled_space_ids: set[str] = set()
+    cdt_floor_indices: set[int] = set()
+    prebuilt_floor_edges: list[tuple[int, int, float]] = []
 
-    # Primary source: actual IfcSpace floor geometry. Nodes are born with exact
-    # semantic space ownership instead of inferring rooms from slab/bbox overlap.
+    # Primary source: actual IfcSpace floor geometry. CDT is the default metric
+    # representation because its triangles respect polygon boundaries and its
+    # dual graph is sparse. The older sampled graph is retained as a fallback for
+    # malformed/unsupported space geometry.
     for entity, space in space_sources:
         mesh = _mesh(entity)
         if mesh is None:
             continue
+
+        generated = False
+        if options.floor_backend == "cdt":
+            cdt_points, cdt_edges = build_space_cdt_graph(
+                mesh[0],
+                mesh[1],
+                clearance_m=options.agent_clearance_m,
+            )
+            if cdt_points:
+                base = len(points)
+                points.extend(cdt_points)
+                point_kinds.extend(["walk"] * len(cdt_points))
+                point_levels.extend([space.level_id] * len(cdt_points))
+                point_spaces.extend([space.id] * len(cdt_points))
+                indices = range(base, base + len(cdt_points))
+                cdt_floor_indices.update(indices)
+                prebuilt_floor_edges.extend((base + a, base + b, d) for a, b, d in cdt_edges)
+                floor_space_ids.add(space.id)
+                cdt_space_ids.add(space.id)
+                generated = True
+
+        if generated:
+            continue
+
         sampled = sample_space_floor_triangles(
             mesh[0],
             mesh[1],
@@ -73,14 +109,16 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         )
         if not sampled:
             continue
+        floor_space_ids.add(space.id)
         sampled_space_ids.add(space.id)
         points.extend(sampled)
         point_kinds.extend(["walk"] * len(sampled))
         point_levels.extend([space.level_id] * len(sampled))
         point_spaces.extend([space.id] * len(sampled))
 
-    # IFCs without usable IfcSpace geometry still get the original slab fallback.
-    if not sampled_space_ids:
+    # IFCs without usable IfcSpace geometry still get a slab-based sampled
+    # fallback so semantic defects do not make the complete building unroutable.
+    if not floor_space_ids:
         floor_entities = [
             e for e in model.by_type("IfcSlab")
             if str(getattr(e, "PredefinedType", "")).upper() not in {"ROOF"}
@@ -97,9 +135,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
 
-    # Vertical circulation remains geometry-driven and is allowed to bridge
-    # storeys/spaces. It is sampled after space floors so local routing can join
-    # landings to the nearest floor nodes.
+    # Vertical circulation remains geometry-driven. It is deliberately separate
+    # from the level-floor CDT because stairs/ramps are transfer geometry rather
+    # than ordinary floor cells.
     ramp_entities = list(model.by_type("IfcRamp")) + list(model.by_type("IfcRampFlight"))
     stair_flights = list(model.by_type("IfcStairFlight"))
     stair_entities = stair_flights if stair_flights else list(model.by_type("IfcStair"))
@@ -127,6 +165,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             space_id=point_spaces[i] if i < len(point_spaces) else None,
         ))
 
+    for i, j, d in prebuilt_floor_edges:
+        out.edges.append(NavEdge(a=f"n:{i}", b=f"n:{j}", distance_m=d, kind="walk"))
+
     wall_obstacles = []
     for wall in model.by_type("IfcWall"):
         mesh = _mesh(wall)
@@ -136,10 +177,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         if obstacle is not None:
             wall_obstacles.append(obstacle)
 
-    # Filter impossible candidates before the bounded-neighbour selection.
-    # Otherwise nearby points across a wall/space boundary can consume all of a
-    # node's nearest-neighbour slots and leave it disconnected from valid points
-    # in its own room.
+    # Filter impossible candidates before bounded-neighbour selection. CDT floor
+    # nodes already have exact internal adjacency, so the radius graph is used
+    # only for fallback geometry and for joining vertical circulation to floors.
     semantic_rejections: set[tuple[int, int]] = set()
     obstacle_rejections: set[tuple[int, int]] = set()
     vertical_kinds = {"stair", "ramp"}
@@ -149,6 +189,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         b_node = out.nodes[j]
         pair = (i, j) if i < j else (j, i)
         is_vertical_transition = a_node.kind in vertical_kinds or b_node.kind in vertical_kinds
+
+        if i in cdt_floor_indices and j in cdt_floor_indices and not is_vertical_transition:
+            return False
 
         if (
             not is_vertical_transition
@@ -190,7 +233,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         bbox = _bbox(door)
         if bbox is None:
             continue
-        p = ((bbox[0]+bbox[3])*0.5, (bbox[1]+bbox[4])*0.5, bbox[2])
+        p = ((bbox[0] + bbox[3]) * 0.5, (bbox[1] + bbox[4]) * 0.5, bbox[2])
 
         related_element_ids = {door.id()}
         for fills_rel in getattr(door, "FillsVoids", ()) or ():
@@ -288,8 +331,12 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "edge_count": len(out.edges),
         "space_count": len(out.spaces),
         "portal_count": len(out.portals),
-        "space_floor_source_count": len(sampled_space_ids),
-        "used_slab_fallback": not bool(sampled_space_ids),
+        "floor_backend": options.floor_backend,
+        "agent_clearance_m": options.agent_clearance_m,
+        "space_floor_source_count": len(floor_space_ids),
+        "cdt_floor_space_count": len(cdt_space_ids),
+        "sampled_floor_space_count": len(sampled_space_ids),
+        "used_slab_fallback": not bool(floor_space_ids),
         "explicit_space_boundary_portals": explicit_portal_count,
         "geometry_inferred_portals": inferred_portal_count,
         "wall_obstacle_count": len(wall_obstacles),
@@ -362,9 +409,9 @@ def _space_at_point(point, space_boxes, tolerance_m: float = 0.15) -> str | None
     x, y, z = point
     for space, box in space_boxes:
         if (
-            box[0]-tolerance_m <= x <= box[3]+tolerance_m
-            and box[1]-tolerance_m <= y <= box[4]+tolerance_m
-            and box[2]-tolerance_m <= z <= box[5]+tolerance_m
+            box[0] - tolerance_m <= x <= box[3] + tolerance_m
+            and box[1] - tolerance_m <= y <= box[4] + tolerance_m
+            and box[2] - tolerance_m <= z <= box[5] + tolerance_m
         ):
             return space.id
     return None
@@ -383,8 +430,8 @@ def _mesh(entity):
         return None
     verts = shape.geometry.verts
     faces = shape.geometry.faces
-    vertices = [(float(verts[i]), float(verts[i+1]), float(verts[i+2])) for i in range(0, len(verts), 3)]
-    triangles = [(int(faces[i]), int(faces[i+1]), int(faces[i+2])) for i in range(0, len(faces), 3)]
+    vertices = [(float(verts[i]), float(verts[i + 1]), float(verts[i + 2])) for i in range(0, len(verts), 3)]
+    triangles = [(int(faces[i]), int(faces[i + 1]), int(faces[i + 2])) for i in range(0, len(faces), 3)]
     return vertices, triangles
 
 
@@ -403,11 +450,11 @@ def _bbox_from_vertices(vertices):
 
 
 def _dist(a, b):
-    return ((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2) ** 0.5
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
 def _distance_to_box(p, box):
-    dx = max(box[0]-p[0], 0.0, p[0]-box[3])
-    dy = max(box[1]-p[1], 0.0, p[1]-box[4])
-    dz = max(box[2]-p[2], 0.0, p[2]-box[5])
-    return (dx*dx + dy*dy + dz*dz) ** 0.5
+    dx = max(box[0] - p[0], 0.0, p[0] - box[3])
+    dy = max(box[1] - p[1], 0.0, p[1] - box[4])
+    dz = max(box[2] - p[2], 0.0, p[2] - box[5])
+    return (dx * dx + dy * dy + dz * dz) ** 0.5
