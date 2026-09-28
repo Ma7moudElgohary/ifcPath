@@ -22,6 +22,8 @@ class Scenario3DPreview(Projected3DPreview):
         self._show_person = True
         self._person_height_m = 1.72
         self._person_triangle_count = 0
+        self._agent_position: Vec3 | None = None
+        self._agent_forward: tuple[float, float] = (0.0, 1.0)
 
     def set_scenario(
         self,
@@ -41,6 +43,16 @@ class Scenario3DPreview(Projected3DPreview):
         self._show_person = bool(visible)
         self.redraw(fit=False)
 
+    def set_agent_pose(
+        self,
+        position: Vec3 | None,
+        forward: tuple[float, float] | None = None,
+    ) -> None:
+        self._agent_position = position
+        if forward is not None:
+            self._agent_forward = forward
+        self.redraw(fit=False)
+
     @property
     def blocked_portals(self) -> set[str]:
         return set(self._blocked_portals)
@@ -52,6 +64,10 @@ class Scenario3DPreview(Projected3DPreview):
     @property
     def person_triangle_count(self) -> int:
         return self._person_triangle_count
+
+    @property
+    def agent_position(self) -> Vec3 | None:
+        return self._agent_position
 
     def _draw_navmesh(self, model: InavModel) -> None:
         super()._draw_navmesh(model)
@@ -74,7 +90,6 @@ class Scenario3DPreview(Projected3DPreview):
             if blocked:
                 fill = QColor(225, 62, 62, 118)
             else:
-                # Higher dynamic route cost becomes more visually intense.
                 alpha = min(150, 55 + int(math.log2(max(1.0, multiplier)) * 24))
                 kind = self._hazard_kinds.get(space_id, "hazard")
                 if kind == "smoke":
@@ -112,19 +127,25 @@ class Scenario3DPreview(Projected3DPreview):
 
     def _draw_person_agent(self) -> None:
         self._person_triangle_count = 0
-        if not self._show_person or self._start_point is None:
+        if not self._show_person:
             return
 
-        forward = (0.0, 1.0)
-        for point in self._route_points[1:]:
-            dx = point[0] - self._start_point[0]
-            dy = point[1] - self._start_point[1]
-            if math.hypot(dx, dy) > 1e-6:
-                forward = (dx, dy)
-                break
+        base = self._agent_position or self._start_point
+        if base is None:
+            return
+
+        forward = self._agent_forward
+        if self._agent_position is None:
+            forward = (0.0, 1.0)
+            for point in self._route_points[1:]:
+                dx = point[0] - base[0]
+                dy = point[1] - base[1]
+                if math.hypot(dx, dy) > 1e-6:
+                    forward = (dx, dy)
+                    break
 
         triangles = build_person_mesh(
-            self._start_point,
+            base,
             forward,
             height_m=self._person_height_m,
         )
