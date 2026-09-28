@@ -7,18 +7,26 @@ from ifcpath.evacuation import (
     EvacuationAgentSpec,
     EvacuationConfig,
     EvacuationSimulator,
+    baseline_egress_space_ids,
     spawn_agents,
 )
 from ifcpath.hierarchical_routing import HierarchicalRouteOptions
 from ifcpath.model import InavModel, Level, NavCell, Portal, Space
 
 
-def _single_space_two_exit_model() -> InavModel:
-    model = InavModel(levels=[Level("L1", "Ground", 0.0)])
-    space = Space("space:A", "Hall", "L1")
+def _add_rect_space(
+    model: InavModel,
+    space_id: str,
+    *,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> None:
+    space = Space(space_id, space_id, "L1")
     model.spaces.append(space)
-    cdt = build_floor_cdt_navmesh(Polygon([(0, 0), (10, 0), (10, 4), (0, 4)]), 0.0)
-    ids = [f"cell:{i}" for i in range(len(cdt.cells))]
+    cdt = build_floor_cdt_navmesh(Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]), 0.0)
+    ids = [f"cell:{space_id}:{i}" for i in range(len(cdt.cells))]
     model.cells.extend(
         NavCell(
             id=ids[i],
@@ -29,12 +37,17 @@ def _single_space_two_exit_model() -> InavModel:
         )
         for i, cell in enumerate(cdt.cells)
     )
+
+
+def _single_space_two_exit_model() -> InavModel:
+    model = InavModel(levels=[Level("L1", "Ground", 0.0)])
+    _add_rect_space(model, "space:A", x0=0.0, y0=0.0, x1=10.0, y1=4.0)
     model.portals = [
         Portal(
             "exit:left",
             "door",
             (0.5, 2.0, 0.0),
-            from_space_id=space.id,
+            from_space_id="space:A",
             level_id="L1",
             width_m=1.0,
             is_exit=True,
@@ -43,7 +56,7 @@ def _single_space_two_exit_model() -> InavModel:
             "exit:right",
             "door",
             (9.5, 2.0, 0.0),
-            from_space_id=space.id,
+            from_space_id="space:A",
             level_id="L1",
             width_m=1.0,
             is_exit=True,
@@ -77,7 +90,6 @@ def test_capacity_aware_exit_assignment_balances_equal_routes() -> None:
 
 def test_exit_flow_capacity_creates_queue_and_separates_departures() -> None:
     model = _single_space_two_exit_model()
-    # Block the right exit so all occupants must pass the 1 person/s left exit.
     options = HierarchicalRouteOptions(blocked_portals={"exit:right"})
     agents = [EvacuationAgentSpec(f"a{i}", (2.0, 2.0, 0.0), 4.0) for i in range(3)]
     simulator = EvacuationSimulator(
@@ -126,7 +138,6 @@ def test_no_available_exit_marks_agent_trapped() -> None:
 
 def test_heterogeneous_free_speeds_change_arrival_time_without_bottleneck() -> None:
     model = _single_space_two_exit_model()
-    # Give each agent the nearest independent exit so capacity does not dominate.
     agents = [
         EvacuationAgentSpec("fast", (2.0, 2.0, 0.0), 2.0),
         EvacuationAgentSpec("slow", (8.0, 2.0, 0.0), 0.8),
@@ -156,6 +167,35 @@ def test_spawn_agents_is_deterministic_and_uses_walkable_cells() -> None:
     assert all(0.0 <= spec.start_m[0] <= 10.0 for spec in first)
     assert all(0.0 <= spec.start_m[1] <= 4.0 for spec in first)
     assert all(0.9 <= spec.speed_mps <= 1.3 for spec in first)
+
+
+def test_automatic_population_excludes_non_egress_navigation_space() -> None:
+    model = _single_space_two_exit_model()
+    _add_rect_space(model, "space:roof", x0=20.0, y0=0.0, x1=24.0, y1=4.0)
+
+    eligible = baseline_egress_space_ids(model)
+    agents = spawn_agents(model, 30, seed=11)
+
+    assert eligible == {"space:A"}
+    assert len(agents) == 30
+    assert all(spec.start_m[0] < 10.0 for spec in agents)
+
+    # The filter is only for synthetic/demo population. Explicit occupants in
+    # a genuinely unreachable space remain visible as trapped safety findings.
+    explicit = EvacuationSimulator(
+        model,
+        [EvacuationAgentSpec("roof-worker", (22.0, 2.0, 0.0), 1.0)],
+    )
+    assert explicit.agents[0].status == "trapped"
+
+
+def test_spawn_filter_can_be_disabled_for_diagnostic_populations() -> None:
+    model = _single_space_two_exit_model()
+    _add_rect_space(model, "space:roof", x0=20.0, y0=0.0, x1=24.0, y1=4.0)
+
+    agents = spawn_agents(model, 40, seed=3, egress_reachable_only=False)
+
+    assert any(spec.start_m[0] > 20.0 for spec in agents)
 
 
 def test_replan_preserves_evacuated_agents_and_moves_active_origins() -> None:
