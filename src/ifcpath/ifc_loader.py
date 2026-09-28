@@ -8,6 +8,7 @@ import ifcopenshell.geom
 
 from .geometry import build_radius_edges, sample_walkable_triangles
 from .model import InavModel, Level, NavEdge, NavNode, Portal, Space
+from .obstacles import edge_crosses_obstacle, wall_obstacle_from_vertices
 
 
 @dataclass(slots=True)
@@ -86,7 +87,20 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             space_id=_space_at_point(p, space_boxes),
         ))
 
+    wall_obstacles = []
+    for wall in model.by_type("IfcWall"):
+        mesh = _mesh(wall)
+        if mesh is None:
+            continue
+        obstacle = wall_obstacle_from_vertices(mesh[0])
+        if obstacle is not None:
+            wall_obstacles.append(obstacle)
+
+    blocked_walk_edges = 0
     for i, j, d in build_radius_edges(points, options.connect_distance_m):
+        if edge_crosses_obstacle(points[i], points[j], wall_obstacles):
+            blocked_walk_edges += 1
+            continue
         out.edges.append(NavEdge(a=f"n:{i}", b=f"n:{j}", distance_m=d, kind="walk"))
 
     explicit_portal_count = 0
@@ -151,6 +165,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             portal_id=portal_id,
         ))
 
+        # Portal edges intentionally bypass wall-obstacle filtering: doors are
+        # the sanctioned graph transitions through wall footprints.
         nearest = sorted(
             ((_dist(p, n.position_m), n) for n in out.nodes if n.id.startswith("n:")),
             key=lambda x: x[0],
@@ -166,6 +182,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "portal_count": len(out.portals),
         "explicit_space_boundary_portals": explicit_portal_count,
         "geometry_inferred_portals": inferred_portal_count,
+        "wall_obstacle_count": len(wall_obstacles),
+        "blocked_walk_edges": blocked_walk_edges,
         "generator": "ifcpath",
     })
     return out
