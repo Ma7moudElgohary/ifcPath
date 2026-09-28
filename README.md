@@ -32,7 +32,7 @@ The production core does **not** depend on Pathfinder or TopologicPy. The implem
 
 ### BIM / generator
 
-- IFC storeys, `IfcSpace`, doors, stairs and ramps via IfcOpenShell.
+- IFC storeys, `IfcSpace`, doors, stairs, ramps and conservatively qualified `IfcTransportElement(ELEVATOR)` connectors via IfcOpenShell.
 - `IfcRelSpaceBoundary*` preferred for door↔space topology; geometry inference is fallback.
 - Actual bottom surfaces of `IfcSpace` are the primary walkable source.
 - Fixed IFC obstacles are subtracted before navigation generation (`IfcColumn` by default).
@@ -40,6 +40,7 @@ The production core does **not** depend on Pathfinder or TopologicPy. The implem
 - Constrained Delaunay triangulation (CDT) is the default floor backend.
 - Sampled graph backend remains available for malformed IFC geometry.
 - Explicit vertical semantic transitions inferred from stair/ramp landing contacts.
+- Elevator extraction fails closed: the elevator XY footprint must resolve qualified landing doors/walk domains on at least two distinct levels; its raw geometry Z extent is never assumed to be the full shaft.
 
 ### Portable INAV 0.3
 
@@ -48,7 +49,8 @@ INAV contains both semantic and metric representations:
 - levels;
 - spaces;
 - portals/exits;
-- semantic transitions (`Space ↔ Door/Stair/Ramp ↔ Space`);
+- semantic transitions (`Space ↔ Door/Stair/Ramp/Elevator ↔ Space`);
+- optional semantic `resource_id` identity so adjacent transitions from one physical elevator share one runtime car/resource;
 - triangular navmesh cells with reciprocal neighbours;
 - metric nodes/edges for backward-compatible graph routing;
 - node→cell identity;
@@ -105,7 +107,7 @@ goal
 
 Every usable door or stair/ramp landing contributes an anchor on each connected semantic space. Anchors within a space are connected using the exact local funnel path; semantic transfers connect anchors between spaces. Global Dijkstra therefore evaluates competing doors and alternative room sequences using real geometric distance.
 
-Vertical transfers preserve the sampled stair/ramp geometry from the BIM-derived metric graph instead of collapsing a storey change into a straight Z segment.
+Vertical transfers preserve the sampled stair/ramp geometry from the BIM-derived metric graph instead of collapsing a storey change into a straight Z segment. Qualified elevator connectors remain semantic resources so runtime simulation can apply car state, capacity and timing rather than pretending an elevator is walkable sloped geometry.
 
 The Python API is:
 
@@ -146,7 +148,7 @@ The desktop Builder supports three movement layers over the same INAV routing/se
 - **Hybrid deterministic** — the building-wide semantic handoff architecture with a dependency-free local-motion backend.
 - **Hybrid microscopic (JuPedSim)** — optional JuPedSim collision-aware local motion inside connected semantic spaces, while IFCPath remains authoritative for doors, walls, queues, stairs/ramps/elevators and live rerouting.
 
-Hybrid execution treats every semantic portal as an explicit handoff:
+Hybrid execution treats walkable semantic portals as explicit handoffs:
 
 ```text
 local motion in space A
@@ -157,10 +159,30 @@ exact IFCPath transfer geometry
     ↓
 local motion in space B
     ↓
-... vertical 3D transfers use the same lifecycle ...
+... stair/ramp 3D transfers use the same lifecycle ...
     ↓
 exit gate
 ```
+
+Elevators use a separate stateful lifecycle because a car is a shared temporal resource, not a walking segment:
+
+```text
+local motion to elevator landing
+    ↓
+shared-car request / queue
+    ↓
+empty-car reposition if needed
+    ↓
+door dwell + finite-capacity boarding
+    ↓
+vertical car travel
+    ↓
+door dwell + alighting
+    ↓
+destination semantic domain
+```
+
+All adjacent level transitions inferred from one IFC elevator GUID share the same `resource_id`, so a three-storey shaft is modeled as one car resource instead of two independent floor-to-floor cars. The current dispatcher is intentionally deterministic and configurable (`speed_mps`, door dwell and person capacity); it does **not** claim to reproduce a manufacturer's group-control algorithm or live BMS logic. Those can replace the dispatcher behind the same semantic resource contract later.
 
 Microscopic domains are intentionally **space-local**, not a blindly unioned whole floor. This prevents a crowd solver from bypassing walls or blocked doors and satisfies JuPedSim's connected-accessible-area requirement. JuPedSim is optional and is installed with:
 
@@ -190,6 +212,8 @@ ifcpath build Building.ifc -o Building.inav \
 ```
 
 `--obstacle-class` may be repeated. Furniture is deliberately not treated as fixed by default because IFC files often mix movable and built-in objects.
+
+Elevator extraction records diagnostic counts in INAV metadata: detected transport elements, connected elevator resources, qualified landings and rejected ambiguous candidates. A detected elevator with fewer than two qualified landings remains unconnected rather than receiving a guessed vertical route.
 
 Validate a generated model:
 
