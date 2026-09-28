@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 
 from .model import InavModel, Level, NavEdge, NavNode, Portal, SemanticTransition, Space
+from .semantic import ensure_semantic_transitions
 
 
 def save_inav(model: InavModel, path: str | Path) -> Path:
+    ensure_semantic_transitions(model)
     path = Path(path)
     if path.suffix.lower() != ".inav":
         path = path.with_suffix(".inav")
@@ -16,7 +18,7 @@ def save_inav(model: InavModel, path: str | Path) -> Path:
 
 def load_inav(path: str | Path) -> InavModel:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    return InavModel(
+    model = InavModel(
         schema=raw.get("schema", "ifcpath.inav/0.1"),
         units=raw.get("units", "m"),
         up_axis=raw.get("up_axis", "Z"),
@@ -28,6 +30,8 @@ def load_inav(path: str | Path) -> InavModel:
         edges=[NavEdge(**x) for x in raw.get("edges", [])],
         metadata=raw.get("metadata", {}),
     )
+    ensure_semantic_transitions(model)
+    return model
 
 
 def _tuple_vec(value: dict, key: str) -> dict:
