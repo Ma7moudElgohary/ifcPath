@@ -33,3 +33,20 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[desktop,test]"
       - run: pytest -q tests/test_desktop_builder.py
+
+  desktop-package-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[desktop-build]"
+      - run: python scripts/build_desktop.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IFCPathBuilder-Windows
+          path: dist/IFCPathBuilder/**
+          if-no-files-found: error
