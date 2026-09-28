@@ -6,6 +6,7 @@ from pathlib import Path
 import ifcopenshell
 import ifcopenshell.geom
 
+from .exits import classify_ifc_door_exit
 from .geometry import build_radius_edges, sample_space_floor_triangles, sample_walkable_triangles
 from .model import InavModel, Level, NavEdge, NavNode, Portal, Space
 from .obstacles import edge_crosses_obstacle, wall_obstacle_from_vertices
@@ -23,7 +24,10 @@ class BuildOptions:
 def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> InavModel:
     options = options or BuildOptions()
     model = ifcopenshell.open(str(path))
-    out = InavModel(metadata={"source_ifc": str(path)})
+    out = InavModel(metadata={
+        "source_ifc": str(path),
+        "source_schema": str(getattr(model, "schema", "") or ""),
+    })
 
     levels = _levels(model)
     out.levels.extend(levels)
@@ -170,6 +174,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
 
     explicit_portal_count = 0
     inferred_portal_count = 0
+    explicit_external_exit_count = 0
+    explicit_internal_door_count = 0
+    heuristic_exit_count = 0
 
     for door in model.by_type("IfcDoor"):
         bbox = _bbox(door)
@@ -208,6 +215,14 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         level_id = level_by_entity.get(door.id()) or (
             connected_spaces[0].level_id if connected_spaces else None
         )
+        exit_classification = classify_ifc_door_exit(door, len(connected_spaces))
+        if exit_classification.source == "Pset_DoorCommon.IsExternal":
+            if exit_classification.is_exit:
+                explicit_external_exit_count += 1
+            else:
+                explicit_internal_door_count += 1
+        elif exit_classification.is_exit:
+            heuristic_exit_count += 1
 
         portal = Portal(
             id=portal_id,
@@ -218,7 +233,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             level_id=level_id,
             width_m=float(getattr(door, "OverallWidth", 0.0) or 0.0) or None,
             ifc_guid=door.GlobalId,
-            is_exit=(len(connected_spaces) == 1),
+            is_exit=exit_classification.is_exit,
+            is_external=exit_classification.is_external,
+            exit_source=exit_classification.source,
         )
         out.portals.append(portal)
 
@@ -277,6 +294,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "used_slab_fallback": not bool(sampled_space_ids),
         "explicit_space_boundary_portals": explicit_portal_count,
         "geometry_inferred_portals": inferred_portal_count,
+        "explicit_external_exits": explicit_external_exit_count,
+        "explicit_internal_doors": explicit_internal_door_count,
+        "heuristic_exits": heuristic_exit_count,
         "wall_obstacle_count": len(wall_obstacles),
         "blocked_walk_edges": blocked_walk_edges,
         "semantic_cross_space_edges_removed": semantic_cross_space_edges,
