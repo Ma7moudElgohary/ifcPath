@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from ifcpath.exporter import load_inav, save_inav
-from ifcpath.model import InavModel, Portal, Space
+from ifcpath.model import InavModel, Level, NavEdge, NavNode, Portal, Space
 from ifcpath.semantic import SemanticRouteOptions, ensure_semantic_transitions, find_space_path
 
 
@@ -39,6 +39,38 @@ def test_derives_space_to_space_and_exit_transitions():
     exit_transition = next(x for x in transitions if x.portal_id == "door:EXIT")
     assert exit_transition.from_space_id == "space:C"
     assert exit_transition.to_space_id is None
+
+
+def test_infers_vertical_stair_transition_from_landing_contacts():
+    model = InavModel(
+        levels=[Level("L1", "L1", 0.0), Level("L2", "L2", 3.0)],
+        spaces=[
+            Space("lower", "Lower lobby", "L1"),
+            Space("upper", "Upper lobby", "L2"),
+        ],
+        nodes=[
+            NavNode("lower-floor", (0.0, 0.0, 0.0), kind="walk", level_id="L1", space_id="lower"),
+            NavNode("stair-0", (0.0, 0.0, 0.2), kind="stair"),
+            NavNode("stair-1", (0.0, 0.0, 2.8), kind="stair"),
+            NavNode("upper-floor", (0.0, 0.0, 3.0), kind="walk", level_id="L2", space_id="upper"),
+        ],
+        edges=[
+            NavEdge("lower-floor", "stair-0", 0.2),
+            NavEdge("stair-0", "stair-1", 2.6),
+            NavEdge("stair-1", "upper-floor", 0.2),
+        ],
+    )
+
+    transitions = ensure_semantic_transitions(model)
+    vertical = [x for x in transitions if x.kind == "stair"]
+
+    assert len(vertical) == 1
+    assert vertical[0].from_space_id == "lower"
+    assert vertical[0].to_space_id == "upper"
+    assert vertical[0].from_level_id == "L1"
+    assert vertical[0].to_level_id == "L2"
+    assert vertical[0].source == "metric_vertical_touch"
+    assert find_space_path(model, "lower", "upper") == ["lower", "upper"]
 
 
 def test_semantic_route_reacts_to_blocked_portals_and_space_costs():
