@@ -262,7 +262,7 @@ class IFCPathScenarioWindow(IFCPathBuilder3DWindow):
 
     def _scenario_changed(self) -> None:
         was_running = self._walker.running
-        current = self._walker.position if self._walker.points and self._walker.distance_m > 1e-9 else None
+        current = self._walker.position if self._walker.points else None
         self._sync_scenario_controls()
         self._apply_scenario_to_preview()
         if self._start_point is not None and self._goal_point is not None:
