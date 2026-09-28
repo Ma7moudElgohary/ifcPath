@@ -9,7 +9,12 @@ import ifcopenshell.geom
 from .cdt import build_space_cdt_graph
 from .geometry import build_radius_edges, sample_space_floor_triangles, sample_walkable_triangles
 from .model import InavModel, Level, NavEdge, NavNode, Portal, Space
-from .obstacles import edge_crosses_obstacle, wall_obstacle_from_vertices
+from .obstacles import (
+    edge_crosses_obstacle,
+    mesh_obstacle_from_triangles,
+    obstacle_intersects_pedestrian_volume,
+    wall_obstacle_from_vertices,
+)
 
 
 @dataclass(slots=True)
@@ -21,6 +26,8 @@ class BuildOptions:
     max_slope_deg: float = 50.0
     floor_backend: str = "cdt"
     agent_clearance_m: float = 0.0
+    agent_height_m: float = 1.8
+    fixed_obstacle_classes: tuple[str, ...] = ("IfcColumn",)
 
 
 def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> InavModel:
@@ -59,6 +66,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         space_by_entity_id[entity.id()] = space
 
     boundary_spaces = _boundary_space_map(model, space_by_entity_id)
+    fixed_obstacles = _fixed_obstacles(model, options.fixed_obstacle_classes)
 
     points: list[tuple[float, float, float]] = []
     point_kinds: list[str] = []
@@ -69,11 +77,10 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     sampled_space_ids: set[str] = set()
     cdt_floor_indices: set[int] = set()
     prebuilt_floor_edges: list[tuple[int, int, float]] = []
+    obstacle_space_applications = 0
 
-    # Primary source: actual IfcSpace floor geometry. CDT is the default metric
-    # representation because its triangles respect polygon boundaries and its
-    # dual graph is sparse. The older sampled graph is retained as a fallback for
-    # malformed/unsupported space geometry.
+    # Primary source: actual IfcSpace floor geometry. Fixed obstacles whose
+    # vertical extents intersect pedestrian height are subtracted before CDT.
     for entity, space in space_sources:
         mesh = _mesh(entity)
         if mesh is None:
@@ -81,10 +88,21 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
 
         generated = False
         if options.floor_backend == "cdt":
+            floor_z = min(vertex[2] for vertex in mesh[0])
+            applicable_obstacles = [
+                obstacle.footprint
+                for obstacle in fixed_obstacles
+                if obstacle_intersects_pedestrian_volume(
+                    obstacle,
+                    floor_z,
+                    options.agent_height_m,
+                )
+            ]
             cdt_points, cdt_edges = build_space_cdt_graph(
                 mesh[0],
                 mesh[1],
                 clearance_m=options.agent_clearance_m,
+                obstacle_footprints=applicable_obstacles,
             )
             if cdt_points:
                 base = len(points)
@@ -97,6 +115,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
                 prebuilt_floor_edges.extend((base + a, base + b, d) for a, b, d in cdt_edges)
                 floor_space_ids.add(space.id)
                 cdt_space_ids.add(space.id)
+                obstacle_space_applications += len(applicable_obstacles)
                 generated = True
 
         if generated:
@@ -116,8 +135,6 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         point_levels.extend([space.level_id] * len(sampled))
         point_spaces.extend([space.id] * len(sampled))
 
-    # IFCs without usable IfcSpace geometry still get a slab-based sampled
-    # fallback so semantic defects do not make the complete building unroutable.
     if not floor_space_ids:
         floor_entities = [
             e for e in model.by_type("IfcSlab")
@@ -135,9 +152,6 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
 
-    # Vertical circulation remains geometry-driven. It is deliberately separate
-    # from the level-floor CDT because stairs/ramps are transfer geometry rather
-    # than ordinary floor cells.
     ramp_entities = list(model.by_type("IfcRamp")) + list(model.by_type("IfcRampFlight"))
     stair_flights = list(model.by_type("IfcStairFlight"))
     stair_entities = stair_flights if stair_flights else list(model.by_type("IfcStair"))
@@ -177,9 +191,6 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         if obstacle is not None:
             wall_obstacles.append(obstacle)
 
-    # Filter impossible candidates before bounded-neighbour selection. CDT floor
-    # nodes already have exact internal adjacency, so the radius graph is used
-    # only for fallback geometry and for joining vertical circulation to floors.
     semantic_rejections: set[tuple[int, int]] = set()
     obstacle_rejections: set[tuple[int, int]] = set()
     vertical_kinds = {"stair", "ramp"}
@@ -333,6 +344,10 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "portal_count": len(out.portals),
         "floor_backend": options.floor_backend,
         "agent_clearance_m": options.agent_clearance_m,
+        "agent_height_m": options.agent_height_m,
+        "fixed_obstacle_classes": list(options.fixed_obstacle_classes),
+        "fixed_obstacle_count": len(fixed_obstacles),
+        "obstacle_space_applications": obstacle_space_applications,
         "space_floor_source_count": len(floor_space_ids),
         "cdt_floor_space_count": len(cdt_space_ids),
         "sampled_floor_space_count": len(sampled_space_ids),
@@ -345,6 +360,27 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "generator": "ifcpath",
     })
     return out
+
+
+def _fixed_obstacles(model, class_names: tuple[str, ...]):
+    result = []
+    seen_entities: set[int] = set()
+    for class_name in class_names:
+        try:
+            entities = model.by_type(class_name)
+        except Exception:
+            continue
+        for entity in entities:
+            if entity.id() in seen_entities:
+                continue
+            seen_entities.add(entity.id())
+            mesh = _mesh(entity)
+            if mesh is None:
+                continue
+            obstacle = mesh_obstacle_from_triangles(mesh[0], mesh[1])
+            if obstacle is not None:
+                result.append(obstacle)
+    return result
 
 
 def _levels(model) -> list[Level]:
