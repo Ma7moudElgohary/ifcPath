@@ -37,6 +37,13 @@ def main() -> None:
         fail(f"too few IFC spaces extracted: {stats.get('spaces', 0)}")
     if stats.get("portals", 0) < 5:
         fail(f"too few door portals extracted: {stats.get('portals', 0)}")
+    if stats.get("semantic_transitions", 0) < stats.get("portals", 0):
+        fail(
+            "semantic transition graph is incomplete: "
+            f"{stats.get('semantic_transitions', 0)} transitions for {stats.get('portals', 0)} portals"
+        )
+    if stats.get("semantic_transition_errors", 0) != 0:
+        fail(f"semantic transition graph has {stats.get('semantic_transition_errors')} validation errors")
     if stats.get("portal_side_failures", 0) != 0:
         fail(f"{stats.get('portal_side_failures')} semantic portals are missing one or more connected sides")
     if stats.get("isolated_nodes", 0) != 0:
@@ -53,8 +60,8 @@ def main() -> None:
     print(
         f"nodes={nodes} edges={edges} edge_ratio={edges / max(nodes, 1):.2f} "
         f"levels={stats.get('levels')} spaces={stats.get('spaces')} "
-        f"portals={stats.get('portals')} components={components} "
-        f"exit_reachable={stats.get('exit_reachable_ratio', 0.0):.1%} "
+        f"portals={stats.get('portals')} transitions={stats.get('semantic_transitions')} "
+        f"components={components} exit_reachable={stats.get('exit_reachable_ratio', 0.0):.1%} "
         f"split_spaces={stats.get('split_spaces')}"
     )
 
