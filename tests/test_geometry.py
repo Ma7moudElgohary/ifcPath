@@ -14,3 +14,14 @@ def test_radius_edges_connect_near_points_only():
     pairs = {(a, b) for a, b, _ in edges}
     assert (0, 1) in pairs
     assert (1, 2) not in pairs
+
+
+def test_radius_edges_bound_dense_neighbourhoods():
+    pts = [(i * 0.01, 0.0, 0.0) for i in range(30)]
+    edges = build_radius_edges(pts, 1.0, max_neighbors=4)
+
+    # Undirected union can exceed N*k/2 because neighbour nomination is not
+    # necessarily symmetric, but it must stay linear instead of becoming the
+    # complete graph (435 edges for this fixture).
+    assert len(edges) < len(pts) * 4
+    assert len(edges) < 435
