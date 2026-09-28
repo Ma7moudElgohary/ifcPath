@@ -6,7 +6,7 @@ from pathlib import Path
 import ifcopenshell
 import ifcopenshell.geom
 
-from .geometry import build_radius_edges, sample_walkable_triangles
+from .geometry import build_radius_edges, sample_space_floor_triangles, sample_walkable_triangles
 from .model import InavModel, Level, NavEdge, NavNode, Portal, Space
 from .obstacles import edge_crosses_obstacle, wall_obstacle_from_vertices
 
@@ -28,14 +28,17 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     levels = _levels(model)
     out.levels.extend(levels)
     level_by_entity = {x[0]: x[1] for x in _contained_levels(model, levels)}
+    level_by_guid = {level.id.removeprefix("level:"): level.id for level in levels}
 
     space_boxes: list[tuple[Space, tuple[float, float, float, float, float, float]]] = []
+    space_sources: list[tuple[object, Space]] = []
     space_by_entity_id: dict[int, Space] = {}
     for entity in model.by_type("IfcSpace"):
-        bbox = _bbox(entity)
-        if bbox is None:
+        mesh = _mesh(entity)
+        if mesh is None or not mesh[0]:
             continue
-        level_id = level_by_entity.get(entity.id())
+        bbox = _bbox_from_vertices(mesh[0])
+        level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
         centroid = ((bbox[0]+bbox[3])*0.5, (bbox[1]+bbox[4])*0.5, (bbox[2]+bbox[5])*0.5)
         space = Space(
             id=f"space:{entity.GlobalId}",
@@ -46,6 +49,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         )
         out.spaces.append(space)
         space_boxes.append((space, bbox))
+        space_sources.append((entity, space))
         space_by_entity_id[entity.id()] = space
 
     boundary_spaces = _boundary_space_map(model, space_by_entity_id)
@@ -53,17 +57,53 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     points: list[tuple[float, float, float]] = []
     point_kinds: list[str] = []
     point_levels: list[str | None] = []
+    point_spaces: list[str | None] = []
+    sampled_space_ids: set[str] = set()
 
-    floor_entities = [
-        e for e in model.by_type("IfcSlab")
-        if str(getattr(e, "PredefinedType", "")).upper() not in {"ROOF"}
-    ]
+    # Primary source: actual IfcSpace floor geometry. Nodes are born with exact
+    # semantic space ownership instead of inferring rooms from slab/bbox overlap.
+    for entity, space in space_sources:
+        mesh = _mesh(entity)
+        if mesh is None:
+            continue
+        sampled = sample_space_floor_triangles(
+            mesh[0],
+            mesh[1],
+            spacing_m=options.floor_spacing_m,
+        )
+        if not sampled:
+            continue
+        sampled_space_ids.add(space.id)
+        points.extend(sampled)
+        point_kinds.extend(["walk"] * len(sampled))
+        point_levels.extend([space.level_id] * len(sampled))
+        point_spaces.extend([space.id] * len(sampled))
+
+    # IFCs without usable IfcSpace geometry still get the original slab fallback.
+    if not sampled_space_ids:
+        floor_entities = [
+            e for e in model.by_type("IfcSlab")
+            if str(getattr(e, "PredefinedType", "")).upper() not in {"ROOF"}
+        ]
+        for entity in floor_entities:
+            mesh = _mesh(entity)
+            if mesh is None:
+                continue
+            sampled = sample_walkable_triangles(
+                mesh[0], mesh[1], options.floor_spacing_m, options.max_slope_deg
+            )
+            points.extend(sampled)
+            point_kinds.extend(["walk"] * len(sampled))
+            point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
+            point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
+
+    # Vertical circulation remains geometry-driven and is allowed to bridge
+    # storeys/spaces. It is sampled after space floors so local routing can join
+    # landings to the nearest floor nodes.
     ramp_entities = list(model.by_type("IfcRamp")) + list(model.by_type("IfcRampFlight"))
     stair_flights = list(model.by_type("IfcStairFlight"))
     stair_entities = stair_flights if stair_flights else list(model.by_type("IfcStair"))
-
     for entities, spacing, kind in (
-        (floor_entities, options.floor_spacing_m, "walk"),
         (ramp_entities, options.floor_spacing_m, "ramp"),
         (stair_entities, options.stair_spacing_m, "stair"),
     ):
@@ -71,11 +111,11 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             mesh = _mesh(entity)
             if mesh is None:
                 continue
-            verts, tris = mesh
-            sampled = sample_walkable_triangles(verts, tris, spacing, options.max_slope_deg)
+            sampled = sample_walkable_triangles(mesh[0], mesh[1], spacing, options.max_slope_deg)
             points.extend(sampled)
             point_kinds.extend([kind] * len(sampled))
             point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
+            point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
 
     out.nodes = []
     for i, p in enumerate(points):
@@ -84,7 +124,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             position_m=p,
             kind=point_kinds[i] if i < len(point_kinds) else "walk",
             level_id=point_levels[i] if i < len(point_levels) else None,
-            space_id=_space_at_point(p, space_boxes),
+            space_id=point_spaces[i] if i < len(point_spaces) else None,
         ))
 
     wall_obstacles = []
@@ -104,8 +144,6 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         b_node = out.nodes[j]
         is_vertical_transition = a_node.kind in vertical_kinds or b_node.kind in vertical_kinds
 
-        # BIM semantics are stronger than approximate wall geometry. Ordinary
-        # walk nodes assigned to different spaces may only cross via a portal.
         if (
             not is_vertical_transition
             and a_node.space_id
@@ -115,8 +153,6 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             semantic_cross_space_edges += 1
             continue
 
-        # Same-space edges are allowed even if conservative wall convex hulls
-        # overlap them. Wall geometry is a fallback for unassigned points.
         needs_geometry_check = not (
             a_node.space_id
             and b_node.space_id
@@ -169,7 +205,9 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         from_space = connected_spaces[0].id if connected_spaces else None
         to_space = connected_spaces[1].id if len(connected_spaces) > 1 else None
         portal_id = f"door:{door.GlobalId}"
-        level_id = level_by_entity.get(door.id())
+        level_id = level_by_entity.get(door.id()) or (
+            connected_spaces[0].level_id if connected_spaces else None
+        )
 
         portal = Portal(
             id=portal_id,
@@ -194,9 +232,6 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             portal_id=portal_id,
         ))
 
-        # Attach each side of a semantic door to nearby nodes in that specific
-        # connected space. This prevents a portal from accidentally linking to
-        # six nodes on only one side of the wall.
         connected_node_ids: set[str] = set()
         for connected_space in connected_spaces:
             nearest_in_space = sorted(
@@ -218,7 +253,6 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
                     ))
                     connected_node_ids.add(n.id)
 
-        # Geometry fallback for incomplete IFC/space assignment.
         if not connected_node_ids:
             nearest = sorted(
                 ((_dist(p, n.position_m), n) for n in out.nodes if n.id.startswith("n:")),
@@ -239,6 +273,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "edge_count": len(out.edges),
         "space_count": len(out.spaces),
         "portal_count": len(out.portals),
+        "space_floor_source_count": len(sampled_space_ids),
+        "used_slab_fallback": not bool(sampled_space_ids),
         "explicit_space_boundary_portals": explicit_portal_count,
         "geometry_inferred_portals": inferred_portal_count,
         "wall_obstacle_count": len(wall_obstacles),
@@ -271,12 +307,22 @@ def _contained_levels(model, levels: list[Level]):
             yield element.id(), level_id
 
 
-def _boundary_space_map(model, space_by_entity_id: dict[int, Space]) -> dict[int, list[Space]]:
-    """Map boundary-related IFC elements/openings to their relating spaces.
+def _spatial_level_id(entity, level_by_entity: dict[int, str | None], level_by_guid: dict[str, str]) -> str | None:
+    direct = level_by_entity.get(entity.id())
+    if direct:
+        return direct
+    for rel in getattr(entity, "Decomposes", ()) or ():
+        parent = getattr(rel, "RelatingObject", None)
+        if parent is not None and parent.is_a("IfcBuildingStorey"):
+            return level_by_guid.get(parent.GlobalId)
+    for rel in getattr(entity, "ContainedInStructure", ()) or ():
+        parent = getattr(rel, "RelatingStructure", None)
+        if parent is not None and parent.is_a("IfcBuildingStorey"):
+            return level_by_guid.get(parent.GlobalId)
+    return None
 
-    IFC models that carry IfcRelSpaceBoundary data get semantic connectivity first;
-    geometry is only the fallback for less complete authoring exports.
-    """
+
+def _boundary_space_map(model, space_by_entity_id: dict[int, Space]) -> dict[int, list[Space]]:
     result: dict[int, list[Space]] = {}
     for relation_type in ("IfcRelSpaceBoundary", "IfcRelSpaceBoundary1stLevel", "IfcRelSpaceBoundary2ndLevel"):
         try:
@@ -331,9 +377,13 @@ def _bbox(entity):
     mesh = _mesh(entity)
     if mesh is None or not mesh[0]:
         return None
-    xs = [p[0] for p in mesh[0]]
-    ys = [p[1] for p in mesh[0]]
-    zs = [p[2] for p in mesh[0]]
+    return _bbox_from_vertices(mesh[0])
+
+
+def _bbox_from_vertices(vertices):
+    xs = [p[0] for p in vertices]
+    ys = [p[1] for p in vertices]
+    zs = [p[2] for p in vertices]
     return min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)
 
 
