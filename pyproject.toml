@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 desktop = ["PySide6>=6.8,<7"]
+microscopic = ["jupedsim==1.4.2"]
 desktop-build = [
   "PySide6>=6.8,<7",
   "pyinstaller>=6.11",
