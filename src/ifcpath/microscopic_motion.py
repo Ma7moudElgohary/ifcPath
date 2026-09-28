@@ -61,6 +61,8 @@ class LocalMotionBackend(Protocol):
 
     def add_agent(self, spec: MicroscopicAgentSpec) -> None: ...
 
+    def remove_agent(self, agent_id: str) -> None: ...
+
     def set_target(self, agent_id: str, target_m: Vec3) -> None: ...
 
     def advance(self, delta_seconds: float) -> None: ...
@@ -95,6 +97,11 @@ class KinematicLocalMotionBackend:
         if spec.id in self._agents:
             raise ValueError(f"duplicate microscopic agent id: {spec.id}")
         self._agents[spec.id] = _KinematicState(spec, spec.position_m, spec.target_m)
+
+    def remove_agent(self, agent_id: str) -> None:
+        if agent_id not in self._agents:
+            raise KeyError(agent_id)
+        del self._agents[agent_id]
 
     def set_target(self, agent_id: str, target_m: Vec3) -> None:
         state = self._agents[agent_id]
@@ -219,6 +226,14 @@ class JuPedSimLocalMotionBackend:
         self._agent_ids[spec.id] = native_id
         self._targets[spec.id] = _vec3(spec.target_m)
         self._z_by_agent[spec.id] = float(spec.position_m[2])
+
+    def remove_agent(self, agent_id: str) -> None:
+        native_id = self._agent_ids.pop(agent_id)
+        marked = bool(self._simulation.mark_agent_for_removal(native_id))
+        self._targets.pop(agent_id, None)
+        self._z_by_agent.pop(agent_id, None)
+        if not marked:
+            raise RuntimeError(f"JuPedSim could not mark agent {agent_id!r} for removal")
 
     def set_target(self, agent_id: str, target_m: Vec3) -> None:
         native_id = self._agent_ids[agent_id]
