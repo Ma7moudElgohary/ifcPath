@@ -175,9 +175,11 @@ class ElevatorDispatcher:
 
     def advance(self, delta_seconds: float) -> ElevatorSnapshot:
         remaining = max(0.0, float(delta_seconds))
+        self._settle_zero_duration_phases()
         while remaining > _EPSILON:
             if self.phase == "idle":
                 self._start_next_cycle()
+                self._settle_zero_duration_phases()
                 if self.phase == "idle":
                     self.elapsed_s += remaining
                     remaining = 0.0
@@ -185,7 +187,9 @@ class ElevatorDispatcher:
 
             step = min(remaining, self._phase_remaining_s)
             if step <= _EPSILON:
-                self._finish_phase()
+                self._settle_zero_duration_phases()
+                if self.phase != "idle" and self._phase_remaining_s <= _EPSILON:
+                    raise RuntimeError("elevator zero-duration phase did not settle")
                 continue
 
             self._advance_motion(step)
@@ -194,8 +198,24 @@ class ElevatorDispatcher:
             remaining -= step
             if self._phase_remaining_s <= _EPSILON:
                 self._finish_phase()
+                self._settle_zero_duration_phases()
 
+        # A finite phase may end exactly at the caller's time boundary and enter
+        # a zero-duration successor (for example travel -> zero-dwell alighting).
+        # Settle that successor before exposing the snapshot/completion events.
+        self._settle_zero_duration_phases()
         return self.snapshot()
+
+    def _settle_zero_duration_phases(self) -> None:
+        # Each pass either reaches a positive-duration phase/idle state or
+        # completes one phase. The guard catches accidental zero-time cycles.
+        guard = 0
+        max_passes = max(16, 4 * (len(self._queue) + len(self._onboard) + 1))
+        while self.phase != "idle" and self._phase_remaining_s <= _EPSILON:
+            guard += 1
+            if guard > max_passes:
+                raise RuntimeError("elevator zero-duration phase cycle did not converge")
+            self._finish_phase()
 
     def _start_next_cycle(self) -> None:
         if not self._queue:
@@ -248,8 +268,6 @@ class ElevatorDispatcher:
         self._phase_start_z_m = self.car_z_m
         self._phase_target_z_m = target_z
         self._set_phase_timer(duration)
-        if duration <= _EPSILON:
-            self._finish_phase()
 
     def _set_phase_timer(self, duration_s: float) -> None:
         self._phase_duration_s = max(0.0, float(duration_s))
