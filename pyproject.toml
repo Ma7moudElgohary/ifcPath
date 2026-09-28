@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ifcpath"
+version = "0.1.0"
+description = "IFC to portable indoor navigation (.inav) generator"
+requires-python = ">=3.10"
+dependencies = [
+  "ifcopenshell>=0.8.0",
+  "pydantic>=2.7",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+ifcpath = "ifcpath.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
