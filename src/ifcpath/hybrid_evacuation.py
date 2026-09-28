@@ -25,9 +25,9 @@ _EPSILON = 1e-9
 class HybridEvacuationConfig:
     """Settings for hybrid building-wide microscopic evacuation.
 
-    Horizontal motion inside semantic spaces is delegated to one local-motion
-    backend per IFC level. IFCPath keeps ownership of semantic transitions,
-    bottleneck queues and the exact transition polylines between spaces/levels.
+    Local movement inside a semantic space is delegated to a microscopic backend.
+    IFCPath keeps ownership of semantic transitions, bottleneck queues and the
+    exact transfer polylines between spaces and levels.
     """
 
     local_backend: str = "kinematic"
@@ -42,6 +42,7 @@ class HybridRouteStep:
     kind: str
     points: tuple[Vec3, ...] = ()
     level_id: str | None = None
+    space_id: str | None = None
     gate: RouteGate | None = None
     speed_factor: float = 1.0
     transition_id: str | None = None
@@ -61,25 +62,26 @@ class HybridEvacuationAgentState:
     waiting_time_s: float = 0.0
     evacuated_at_s: float | None = None
     active_level_id: str | None = None
+    active_space_id: str | None = None
     transfer_walker: RouteWalker | None = None
 
 
 class HybridEvacuationSimulator:
-    """Building-wide evacuation with level-local microscopic motion.
+    """Building-wide evacuation with semantic-domain microscopic motion.
 
     IFCPath remains the strategic/tactical authority. It selects hierarchical
     routes and exits, applies runtime blocked/hazard state and enforces semantic
-    transition capacities. Pedestrian interaction inside a horizontal semantic
-    space is handled by a shared local-motion backend for the active level.
+    transition capacities. Pedestrian interaction inside a connected semantic
+    movement domain is handled by a shared local-motion backend.
 
     Every semantic transition is an explicit handoff:
 
-    local solver -> capacity gate -> IFCPath transfer polyline -> local solver
+    local domain -> capacity gate -> IFCPath transfer polyline -> local domain
 
-    This is important even for a same-floor door because two room CDT domains may
-    be separated by wall thickness. A 2D crowd solver must not be asked to jump a
-    non-walkable semantic gap. Stairs/ramps/elevators use the same transfer state
-    but retain their actual 3D route and configured vertical speed factor.
+    Hybrid JuPedSim partitions horizontal motion by semantic space rather than
+    blindly unioning a whole storey. This matches JuPedSim's connected-accessible-
+    area requirement and, more importantly, makes walls and blocked portals hard
+    domain boundaries. A solver therefore cannot bypass IFCPath door policy.
 
     ``local_backend='kinematic'`` is the dependency-free deterministic fallback.
     ``local_backend='jupedsim'`` uses the optional JuPedSim operational backend.
@@ -101,7 +103,7 @@ class HybridEvacuationSimulator:
         self.elapsed_s = 0.0
         self._states: dict[str, HybridEvacuationAgentState] = {}
         self._gates: dict[str, GateState] = {}
-        self._controllers: dict[str, MicroscopicRouteController] = {}
+        self._controllers: dict[tuple[str, str | None], MicroscopicRouteController] = {}
         self._exit_usage: dict[str, int] = {}
         self._historical_max_queue = 0
 
@@ -143,7 +145,11 @@ class HybridEvacuationSimulator:
 
     @property
     def controller_levels(self) -> tuple[str, ...]:
-        return tuple(sorted(self._controllers))
+        return tuple(sorted({level_id for level_id, _space_id in self._controllers}))
+
+    @property
+    def controller_domains(self) -> tuple[tuple[str, str | None], ...]:
+        return tuple(sorted(self._controllers, key=lambda item: (item[0], item[1] or "")))
 
     @property
     def finished(self) -> bool:
@@ -207,7 +213,7 @@ class HybridEvacuationSimulator:
                 )
             )
 
-        # Rebuilding the level simulations avoids stale native solver agents when
+        # Rebuilding the domain simulations avoids stale native solver agents when
         # a live scenario changes while they are mid-route.
         self._controllers.clear()
         self._gates.clear()
@@ -224,6 +230,7 @@ class HybridEvacuationSimulator:
             state.step_index = 0
             state.waiting_gate_id = None
             state.active_level_id = None
+            state.active_space_id = None
             state.transfer_walker = None
             if plan is None:
                 state.status = "trapped"
@@ -254,28 +261,29 @@ class HybridEvacuationSimulator:
         self._accrue_gate_credit(dt)
         self._release_queues()
 
-        # Shared level solvers advance once per tick so all pedestrians on a floor
-        # interact with each other in the same operational simulation.
-        for level_id in sorted(self._controllers):
-            self._controllers[level_id].advance(dt)
+        # Each connected semantic domain advances once per tick so all occupants
+        # inside that domain interact in the same operational simulation.
+        for domain in sorted(self._controllers, key=lambda item: (item[0], item[1] or "")):
+            self._controllers[domain].advance(dt)
 
         for state in self.agents:
             if state.status == "waiting":
                 state.waiting_time_s += dt
                 continue
             if state.status == "moving":
-                self._update_horizontal_state(state)
+                self._update_local_state(state)
             elif state.status == "transfer":
                 self._update_transfer_state(state, dt)
 
         self.elapsed_s += dt
 
-    def _update_horizontal_state(self, state: HybridEvacuationAgentState) -> None:
+    def _update_local_state(self, state: HybridEvacuationAgentState) -> None:
         level_id = state.active_level_id
         if not level_id:
             state.status = "trapped"
             return
-        controller = self._controllers[level_id]
+        domain = (level_id, state.active_space_id)
+        controller = self._controllers[domain]
         snapshot = controller.snapshot(state.spec.id)
         state.position = snapshot.position_m
         state.forward_xy = snapshot.forward_xy
@@ -284,6 +292,7 @@ class HybridEvacuationSimulator:
 
         controller.remove_agent(state.spec.id)
         state.active_level_id = None
+        state.active_space_id = None
         state.step_index += 1
         self._start_current_step(state)
 
@@ -325,7 +334,7 @@ class HybridEvacuationSimulator:
                         state.position = route_points[-1]
                     state.step_index += 1
                     continue
-                controller = self._controller_for(step.level_id)
+                controller = self._controller_for(step.level_id, step.space_id)
                 controller.add_agent(
                     state.spec.id,
                     state.position,
@@ -335,6 +344,7 @@ class HybridEvacuationSimulator:
                     time_gap_s=max(0.01, self.hybrid_config.microscopic.time_gap_s),
                 )
                 state.active_level_id = step.level_id
+                state.active_space_id = step.space_id
                 state.status = "moving"
                 return
 
@@ -360,21 +370,27 @@ class HybridEvacuationSimulator:
         # one should not silently count as a successful evacuation.
         state.status = "trapped"
 
-    def _controller_for(self, level_id: str) -> MicroscopicRouteController:
-        existing = self._controllers.get(level_id)
+    def _controller_for(
+        self,
+        level_id: str,
+        space_id: str | None,
+    ) -> MicroscopicRouteController:
+        domain = (level_id, space_id)
+        existing = self._controllers.get(domain)
         if existing is not None:
             return existing
         backend = create_local_motion_backend(
             self.hybrid_config.local_backend,
             model=self.model,
             level_id=level_id,
+            space_id=space_id,
             config=self.hybrid_config.microscopic,
         )
         controller = MicroscopicRouteController(
             backend,
             config=self.hybrid_config.route,
         )
-        self._controllers[level_id] = controller
+        self._controllers[domain] = controller
         return controller
 
     def _accrue_gate_credit(self, dt: float) -> None:
@@ -431,7 +447,7 @@ def compile_hybrid_route_steps(
     Any segment carrying ``transition_id`` is kept out of the local-motion solver.
     That includes same-floor doors/openings as well as true vertical circulation.
     The transition gate is serviced first, then IFCPath advances the exact transfer
-    polyline, then the agent is inserted into the destination local solver.
+    polyline, then the agent is inserted into the destination semantic domain.
     """
     transition_gates: dict[str, RouteGate] = {}
     exit_gate: RouteGate | None = None
@@ -472,11 +488,13 @@ def compile_hybrid_route_steps(
         if not segment.points:
             continue
         level_id = _segment_level_id(model, segment)
+        space_id = _segment_space_id(segment)
         steps.append(
             HybridRouteStep(
                 kind="level",
                 points=tuple(_vec3(point) for point in segment.points),
                 level_id=level_id,
+                space_id=space_id,
                 speed_factor=1.0,
             )
         )
@@ -497,6 +515,17 @@ def _segment_level_id(model: InavModel, segment: HierarchicalRouteSegment) -> st
         if model.levels:
             return min(model.levels, key=lambda level: abs(level.elevation_m - z)).id
     return None
+
+
+def _segment_space_id(segment: HierarchicalRouteSegment) -> str | None:
+    from_space = segment.from_space_id
+    to_space = segment.to_space_id
+    if from_space and to_space and from_space != to_space:
+        raise ValueError(
+            "non-transition hierarchical segment crosses semantic spaces: "
+            f"{from_space!r} -> {to_space!r}"
+        )
+    return from_space or to_space
 
 
 def _segment_speed_factor(kind: str, config: EvacuationConfig) -> float:
