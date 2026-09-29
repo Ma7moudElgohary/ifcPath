@@ -3,7 +3,7 @@ name: local-app-release
 on:
   pull_request:
     branches: [main]
-    paths:
+    paths: &release_paths
       - 'src/ifcpath/app_runner.py'
       - 'src/ifcpath/study_api.py'
       - 'scripts/build_local_app.py'
@@ -14,7 +14,9 @@ on:
       - '.github/workflows/local-app-release.yml'
   workflow_dispatch:
   push:
+    branches: [main]
     tags: ['v*']
+    paths: *release_paths
 
 permissions:
   contents: write
@@ -110,15 +112,29 @@ jobs:
             release/IfcPath-Windows-Python-Bundle.zip
             dist/ifcpath-*.whl
 
-      - name: Publish tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish versioned GitHub release
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME `
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+            $tag = "v$version"
+          }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists; artifacts were still qualified and uploaded to this workflow run."
+            exit 0
+          }
+
+          gh release create $tag `
             release/IfcPath-Windows-Portable.zip `
             release/IfcPath-Windows-Python-Bundle.zip `
             (Get-ChildItem dist/ifcpath-*.whl | Select-Object -First 1).FullName `
+            --target $env:GITHUB_SHA `
             --generate-notes `
-            --title "IfcPath $env:GITHUB_REF_NAME"
+            --title "IfcPath $tag"
