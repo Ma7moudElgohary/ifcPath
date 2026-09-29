@@ -33,6 +33,9 @@ async function attachViewerHealth() {
       root.dataset.ifcViewerError = String(event.reason ?? "unhandled rejection during IFC import");
     }
   });
+
+  root.dataset.viewerHealth = "ready";
+  root.dispatchEvent(new CustomEvent("ifcpath:viewer-health-ready"));
 }
 
 async function waitFor<T extends Element>(selector: string): Promise<T> {
