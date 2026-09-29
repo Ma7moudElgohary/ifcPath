@@ -35,8 +35,16 @@ def connect_cells_by_shared_edges(cells, tolerance_m=1e-5):
         if len(indices) != 2:
             continue
         a,b=indices
-        cells[a].neighbor_ids.append(cells[b].id)
-        cells[b].neighbor_ids.append(cells[a].id)
+        ca,cb=cells[a],cells[b]
+        # Adjacent room triangulations can share the same geometric boundary.
+        # They are not traversable unless a semantic door/portal authorises the
+        # crossing. Vertical circulation surfaces are stitched separately.
+        if ca.terrain == cb.terrain == "open" and ca.space_id and cb.space_id and ca.space_id != cb.space_id:
+            continue
+        if cb.id not in ca.neighbor_ids:
+            ca.neighbor_ids.append(cb.id)
+        if ca.id not in cb.neighbor_ids:
+            cb.neighbor_ids.append(ca.id)
         shared_key = next((k for k, inds in owners.items() if inds == indices), None)
         if shared_key is not None:
             pa = tuple(v / scale for v in shared_key[0])
