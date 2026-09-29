@@ -6,11 +6,20 @@ from pathlib import Path
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, SemanticTransition, Space
 from .semantic import ensure_semantic_transitions
 from .surface_portals import bind_semantic_surface_portals
+from .vertical_surface import ensure_surface_vertical_transitions
+
+
+def _ensure_portable_semantics(model: InavModel) -> None:
+    # Surface-derived stairs/ramps are authoritative for walkable vertical
+    # circulation. Add those semantic transitions before the sampled-node
+    # compatibility inference so the portable file preserves them explicitly.
+    ensure_surface_vertical_transitions(model)
+    ensure_semantic_transitions(model)
+    bind_semantic_surface_portals(model)
 
 
 def save_inav(model: InavModel, path: str | Path) -> Path:
-    ensure_semantic_transitions(model)
-    bind_semantic_surface_portals(model)
+    _ensure_portable_semantics(model)
     path = Path(path)
     if path.suffix.lower() != ".inav":
         path = path.with_suffix(".inav")
@@ -38,8 +47,7 @@ def model_from_dict(raw: dict) -> InavModel:
         edges=[NavEdge(**x) for x in raw.get("edges", [])],
         metadata=raw.get("metadata", {}),
     )
-    ensure_semantic_transitions(model)
-    bind_semantic_surface_portals(model)
+    _ensure_portable_semantics(model)
     return model
 
 

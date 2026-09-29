@@ -9,6 +9,7 @@ from .geometry import Vec3, distance
 from .model import InavModel, NavNode, SemanticTransition
 from .navmesh_routing import find_navmesh_cell, find_navmesh_path, snap_point_to_navmesh
 from .semantic import ensure_semantic_transitions
+from .vertical_surface import ensure_surface_vertical_transitions, find_surface_vertical_transfer
 
 
 _VERTICAL_KINDS = {"stair", "ramp", "elevator", "escalator"}
@@ -92,15 +93,14 @@ def find_hierarchical_path(
     goal: Vec3,
     options: HierarchicalRouteOptions | None = None,
 ) -> HierarchicalRoute | None:
-    """Find a building-wide route using semantic transfers and exact local geometry.
+    """Find a building-wide route using semantic transfers and exact geometry.
 
-    The graph searched here is deliberately *not* the raw centroid graph. Each
-    door/vertical transition contributes one anchor on each connected semantic
-    space. Anchors within a CDT space are connected by funnel-shortened paths;
-    semantic transitions connect anchors between spaces. This lets route choice
-    account for the actual distance to competing doors while preserving BIM
-    topology and Digital Twin blocked/cost state.
+    Walkable stair/ramp/escalator transitions are inferred from and routed over
+    continuous ``NavCell`` surfaces. Portal transfers retain IFC semantics, while
+    elevators remain explicit resource transitions. Sampled vertical nodes are
+    only a compatibility fallback for older INAV models that lack surface terrain.
     """
+    ensure_surface_vertical_transitions(model)
     ensure_semantic_transitions(model)
     options = options or HierarchicalRouteOptions()
     blocked_portals = options.blocked_portals or set()
@@ -164,8 +164,6 @@ def find_hierarchical_path(
 
     adjacency: dict[str, list[_GraphEdge]] = defaultdict(list)
 
-    # Exact intra-space geometry. Intermediate blocked spaces are removed from
-    # the graph; a blocked start space remains routable so an occupant can exit.
     for space_id, anchors in anchors_by_space.items():
         if space_id in blocked_spaces and space_id != start_space_id:
             continue
@@ -202,9 +200,6 @@ def find_hierarchical_path(
                 adjacency[a.id].append(_GraphEdge(b.id, cost, forward))
                 adjacency[b.id].append(_GraphEdge(a.id, cost, reverse))
 
-    # Semantic transfer edges are directed according to transition direction and
-    # blocked-space entry rules. A blocked start space can be exited but never
-    # re-entered during the same route.
     for transfer in transfers:
         transition = transfer.transition
         transfer_length = _polyline_length(transfer.points)
@@ -279,7 +274,6 @@ def _locate_position(
         if snapped is not None:
             return cell.space_id, snapped[0]
 
-    # Sampled-floor fallback: use the nearest semantically owned walk node.
     candidates = [node for node in model.nodes if node.space_id]
     if not candidates:
         return None
@@ -325,8 +319,38 @@ def _build_transfer(
         points = _dedupe_points([from_point, portal.position_m, to_point])
         return _Transfer(transition, from_anchor, to_anchor, points)
 
+    surface = find_surface_vertical_transfer(model, transition)
+    if surface is not None:
+        surface_points = list(surface.points)
+        transfer = _transfer_from_vertical_points(
+            model,
+            transition,
+            surface_points,
+            max_snap_distance_m,
+        )
+        if transfer is not None:
+            return transfer
+
+    # Compatibility only: old INAV files and elevators still use explicit metric
+    # nodes. Walkable stair/ramp surface models should resolve above.
     vertical_points = _vertical_transfer_points(model, transition)
     if not vertical_points:
+        return None
+    return _transfer_from_vertical_points(
+        model,
+        transition,
+        vertical_points,
+        max_snap_distance_m,
+    )
+
+
+def _transfer_from_vertical_points(
+    model: InavModel,
+    transition: SemanticTransition,
+    vertical_points: list[Vec3],
+    max_snap_distance_m: float,
+) -> _Transfer | None:
+    if not transition.to_space_id or not vertical_points:
         return None
     from_point = _snap_space_anchor(
         model, vertical_points[0], transition.from_space_id, max_snap_distance_m
@@ -464,8 +488,6 @@ def _vertical_transfer_points(
             for neighbour_id, weight in edge_adjacency.get(node_id, ()):
                 if neighbour_id not in allowed:
                     continue
-                # Never use a floor-to-floor shortcut; every transfer must touch
-                # the actual vertical component.
                 if node_id not in component and neighbour_id not in component:
                     continue
                 restricted[node_id].append((neighbour_id, weight))

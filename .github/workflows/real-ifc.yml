@@ -43,6 +43,9 @@ jobs:
           python scripts/assert_surface_route_benchmark.py \
             /tmp/Duplex_A_20110907.inav \
             /tmp/surface_route_benchmark.json
+          python scripts/assert_surface_vertical_qualification.py \
+            /tmp/Duplex_A_20110907.inav \
+            /tmp/surface_vertical_qualification.json
       - name: Run real-building crowd evacuation qualification
         run: |
           python scripts/assert_evacuation_qualification.py \
@@ -56,4 +59,5 @@ jobs:
             /tmp/Duplex_A_20110907.inav
             /tmp/qualification.json
             /tmp/surface_route_benchmark.json
+            /tmp/surface_vertical_qualification.json
             /tmp/evacuation_qualification.json
