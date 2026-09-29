@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { AgentVisual, InstancedAgentRenderer } from "./agent-instancing";
 import { toThree, Vec3 } from "./inav-scene";
 
 export type PlaybackAgent = {
@@ -31,26 +32,20 @@ const STATUS_COLOR: Record<string, number> = {
   trapped: 0xd9534f,
 };
 
+/** High-count interpolation/replay of solver output using shared crowd LOD. */
 export class SimulationPlaybackLayer {
   private data?: PlaybackFile;
   private timeS = 0;
   private playing = false;
   private speed = 1;
-  private readonly capacity = 5000;
-  private readonly mesh: THREE.InstancedMesh;
-  private readonly matrix = new THREE.Matrix4();
-  private readonly rotation = new THREE.Quaternion();
-  private readonly scale = new THREE.Vector3(1, 1, 1);
+  private readonly capacity = 20_000;
+  private readonly instances: InstancedAgentRenderer;
+  private visuals: AgentVisual[] = [];
+  private cachedNextFrame?: PlaybackFrame;
+  private cachedNextById = new Map<string, PlaybackAgent>();
 
   constructor(scene: THREE.Scene) {
-    this.mesh = new THREE.InstancedMesh(
-      new THREE.CapsuleGeometry(0.20, 0.90, 3, 6),
-      new THREE.MeshStandardMaterial({ roughness: 0.85 }),
-      this.capacity,
-    );
-    this.mesh.name = "IfcPath solver playback";
-    this.mesh.count = 0;
-    scene.add(this.mesh);
+    this.instances = new InstancedAgentRenderer(scene, this.capacity, 256, 2_048);
   }
 
   load(data: PlaybackFile) {
@@ -60,6 +55,8 @@ export class SimulationPlaybackLayer {
     this.data = data;
     this.timeS = 0;
     this.playing = false;
+    this.cachedNextFrame = undefined;
+    this.cachedNextById.clear();
     this.render();
   }
 
@@ -67,8 +64,10 @@ export class SimulationPlaybackLayer {
     this.data = undefined;
     this.timeS = 0;
     this.playing = false;
-    this.mesh.count = 0;
-    this.mesh.instanceMatrix.needsUpdate = true;
+    this.visuals.length = 0;
+    this.cachedNextFrame = undefined;
+    this.cachedNextById.clear();
+    this.instances.clear();
   }
 
   setPlaying(value: boolean) {
@@ -96,6 +95,14 @@ export class SimulationPlaybackLayer {
     return this.data?.backend ?? "unknown";
   }
 
+  get visibleAgentCount() {
+    return this.instances.stats.total;
+  }
+
+  get lodStats() {
+    return this.instances.stats;
+  }
+
   seek(timeS: number) {
     this.timeS = Math.max(0, Math.min(this.durationS, timeS));
     this.render();
@@ -111,17 +118,21 @@ export class SimulationPlaybackLayer {
   private render() {
     const frames = this.data?.frames ?? [];
     if (!frames.length) {
-      this.mesh.count = 0;
+      this.instances.clear();
       return;
     }
     const [a, b, t] = surroundingFrames(frames, this.timeS);
-    const nextById = new Map(b.agents.map((agent) => [agent.id, agent]));
-    const agents = a.agents.slice(0, this.capacity);
-    this.mesh.count = agents.length;
+    if (b !== this.cachedNextFrame) {
+      this.cachedNextFrame = b;
+      this.cachedNextById = new Map(b.agents.map((agent) => [agent.id, agent]));
+    }
 
-    for (let index = 0; index < agents.length; index++) {
-      const first = agents[index];
-      const second = nextById.get(first.id) ?? first;
+    const count = Math.min(a.agents.length, this.capacity);
+    if (this.visuals.length > count) this.visuals.length = count;
+
+    for (let index = 0; index < count; index++) {
+      const first = a.agents[index];
+      const second = this.cachedNextById.get(first.id) ?? first;
       const position: Vec3 = [
         lerp(first.position_m[0], second.position_m[0], t),
         lerp(first.position_m[1], second.position_m[1], t),
@@ -129,14 +140,17 @@ export class SimulationPlaybackLayer {
       ];
       const forwardX = lerp(first.forward_xy[0], second.forward_xy[0], t);
       const forwardY = lerp(first.forward_xy[1], second.forward_xy[1], t);
-      const worldPosition = toThree(position);
-      this.rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(forwardX, -forwardY));
-      this.matrix.compose(worldPosition, this.rotation, this.scale);
-      this.mesh.setMatrixAt(index, this.matrix);
-      this.mesh.setColorAt(index, new THREE.Color(STATUS_COLOR[first.status] ?? 0x607080));
+      let visual = this.visuals[index];
+      if (!visual) {
+        visual = { position: new THREE.Vector3(), yaw: 0 };
+        this.visuals[index] = visual;
+      }
+      visual.position.copy(toThree(position));
+      visual.yaw = Math.atan2(forwardX, -forwardY);
+      visual.color = STATUS_COLOR[first.status] ?? 0x607080;
+      visual.scale = first.status === "evacuated" ? 0.75 : 1;
     }
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    this.instances.update(this.visuals);
   }
 }
 
