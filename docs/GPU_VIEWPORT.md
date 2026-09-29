@@ -17,7 +17,7 @@ Reasons:
 - explicit GPU buffers and draw pipelines give IFCPath control over BIM batching, culling, picking and future streaming;
 - permissive BSD-2-Clause dependencies.
 
-The design was informed by That Open / Fragments, especially its separation between compact model data, GPU rendering, camera-driven culling/LOD and background/worker processing. IFCPath does not depend on Fragments or copy its implementation.
+The design was informed by That Open / Fragments, especially its separation between compact model data, GPU rendering, camera-driven culling/LOD, BIM identity and background/worker processing. IFCPath does not depend on Fragments or copy its implementation.
 
 ## Current milestone
 
@@ -25,11 +25,12 @@ Implemented:
 
 - renderer-neutral BIM/navmesh GPU batches;
 - batches grouped by level and semantic category;
-- deterministic batch chunking so large models do not become one monolithic allocation;
+- Morton/spatial ordering before deterministic chunking so batch AABBs represent local building regions;
+- per-batch AABB frustum culling before draw submission;
 - float32-safe origin rebasing for large IFC/geospatial coordinates;
 - perspective orbit camera;
 - camera-relative pan and exponential dolly/zoom;
-- CPU ray/triangle picking against authoritative navmesh cells;
+- CPU ray/triangle picking against authoritative navmesh cells for Start/Goal;
 - persistent GPU vertex/index buffers for static BIM/navmesh geometry;
 - camera motion updates only the camera uniform buffer;
 - route polyline in a small dynamic GPU buffer;
@@ -40,6 +41,10 @@ Implemented:
 - dynamic multi-person evacuation rendering;
 - crowd visual LOD: first 36 active occupants use the procedural person mesh, overflow uses lightweight markers;
 - grow-on-demand overlay buffers reused through simulation ticks via `queue.write_buffer()`;
+- IFC GlobalId-preserving BIM selection;
+- BVH-accelerated element picking instead of scanning all BIM triangles;
+- selected-element GPU bounding highlight without rebuilding static BIM batches;
+- docked IFC inspector with occurrence attributes and inherited property sets/quantities;
 - final Builder opt-in through `IFCPATH_VIEWPORT=gpu`;
 - automatic fallback to the established Qt projected renderer if WebGPU initialization fails;
 - an offscreen software-WebGPU CI job that actually creates a device, shader pipeline and rendered frame;
@@ -48,10 +53,11 @@ Implemented:
 Still intentionally pending before GPU becomes the default renderer:
 
 - hardware/Windows surface qualification on representative user machines;
-- GPU ID-buffer IFC element picking / highlighting;
-- frustum and later occlusion culling;
 - geometry streaming / resident-set budgeting;
-- large federated-model performance gates.
+- repeated-geometry instancing/deduplication;
+- large federated-model performance gates;
+- optional GPU ID-buffer picking if profiling shows BVH picking is insufficient for heavily instanced scenes;
+- occlusion culling only if profiling shows a benefit beyond frustum/streaming culling.
 
 GPU mode is explicitly enabled with:
 
@@ -89,6 +95,26 @@ write_buffer() on state changes / simulation ticks
 
 Orbit, pan and zoom never rebuild IFC triangles.
 
+## IFC selection and inspection
+
+A normal left click in GPU mode selects BIM geometry; Start/Goal pick mode remains independent and continues to target CDT navigation cells.
+
+```text
+screen click
+    ↓
+perspective camera ray
+    ↓
+BIM BVH / AABB traversal
+    ↓
+exact IFC preview triangle
+    ↓
+GlobalId
+    ↓
+selection highlight + IFC inspector
+```
+
+The inspector displays IFC identity, scalar occurrence attributes and property sets/quantities extracted with IfcOpenShell. The BVH avoids an O(N) triangle scan and avoids a synchronous GPU readback stall on each click. The selected element is highlighted through a tiny dynamic line buffer; static BIM buffers stay resident.
+
 ## Precision model
 
 IFC and INAV coordinates remain authoritative doubles in metres.
@@ -108,7 +134,7 @@ The target architecture is:
 ```text
 IFC / future cached BIM geometry
             ↓
-semantic element records
+semantic element records + GlobalId
             ↓
 spatial chunks / level chunks
             ↓
@@ -119,19 +145,18 @@ GPU resident-set manager
             ↓
 WebGPU renderer
             ↓
-ID/depth picking + dynamic overlays
+BVH/ID picking + dynamic overlays + IFC inspector
 ```
 
 The next renderer milestones are:
 
 1. qualify the embedded WebGPU surface on Windows hardware and then switch packaged `auto` mode to GPU;
-2. add AABB frustum culling per batch;
-3. introduce GPU ID-buffer element picking and selection/highlighting;
-4. preserve IFC element/object identity through selection and rendering;
-5. add GPU instancing/deduplication for repeated geometry;
-6. add a memory-budgeted resident-set / tile streaming layer;
-7. move IFC preview geometry extraction and GPU batch construction fully off the UI thread;
-8. add performance qualification on intentionally large synthetic and real federated models;
-9. add occlusion culling only after measured profiling shows it is valuable.
+2. add a memory-budgeted resident-set / tile streaming layer;
+3. preserve per-element geometry ranges for isolation/hide/show and repeated-geometry instancing;
+4. add GPU instancing/deduplication for repeated geometry;
+5. move IFC preview geometry extraction and GPU batch/cache construction fully off the UI thread;
+6. add performance qualification on intentionally large synthetic and real federated models;
+7. add an on-disk preview cache so subsequent opens do not remesh the IFC;
+8. add occlusion culling only after measured profiling shows it is valuable.
 
 The portable INAV schema and routing engines remain independent of all of the above.
