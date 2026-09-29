@@ -5,10 +5,12 @@ from pathlib import Path
 
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, SemanticTransition, Space
 from .semantic import ensure_semantic_transitions
+from .surface_portals import bind_semantic_surface_portals
 
 
 def save_inav(model: InavModel, path: str | Path) -> Path:
     ensure_semantic_transitions(model)
+    bind_semantic_surface_portals(model)
     path = Path(path)
     if path.suffix.lower() != ".inav":
         path = path.with_suffix(".inav")
@@ -32,6 +34,7 @@ def load_inav(path: str | Path) -> InavModel:
         metadata=raw.get("metadata", {}),
     )
     ensure_semantic_transitions(model)
+    bind_semantic_surface_portals(model)
     return model
 
 
@@ -46,4 +49,9 @@ def _cell_value(value: dict) -> dict:
     value = dict(value)
     value["vertices_m"] = tuple(tuple(vertex) for vertex in value.get("vertices_m", ()))
     value["neighbor_ids"] = list(value.get("neighbor_ids", ()))
+    value["portals"] = {
+        neighbor: (tuple(segment[0]), tuple(segment[1]))
+        for neighbor, segment in value.get("portals", {}).items()
+    }
+    value["portal_ids"] = dict(value.get("portal_ids", {}))
     return value
