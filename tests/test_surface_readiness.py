@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from ifcpath.model import InavModel, Level, NavCell, Portal, SemanticTransition, Space
+from ifcpath.validation import validate_model
+
+
+def _cell(
+    cell_id: str,
+    x: float,
+    *,
+    space_id: str | None = None,
+    level_id: str | None = None,
+    neighbors: list[str] | None = None,
+    portal_ids: dict[str, str] | None = None,
+) -> NavCell:
+    return NavCell(
+        id=cell_id,
+        vertices_m=((x, 0.0, 0.0), (x + 0.8, 0.0, 0.0), (x, 0.8, 0.0)),
+        space_id=space_id,
+        level_id=level_id,
+        neighbor_ids=list(neighbors or ()),
+        terrain="open",
+        portal_ids=dict(portal_ids or {}),
+    )
+
+
+def test_surface_only_model_is_ready_without_legacy_nodes() -> None:
+    model = InavModel(
+        levels=[Level("L1", "Level 1", 0.0)],
+        spaces=[Space("room", "Room", "L1")],
+        cells=[_cell("room:0", 0.0, space_id="room", level_id="L1")],
+        nodes=[],
+        edges=[],
+    )
+
+    report = validate_model(model)
+
+    assert report.valid
+    assert report.stats["surface_authoritative"] is True
+    assert report.stats["surface_navigation_ready"] is True
+    assert report.stats["legacy_navigation_ready"] is False
+    assert report.stats["navigation_ready"] is True
+    assert not any(issue.code == "NO_NODES" for issue in report.issues)
+
+
+def test_disconnected_surface_spaces_are_not_ready_without_a_semantic_connector() -> None:
+    model = InavModel(
+        levels=[Level("L1", "Level 1", 0.0)],
+        spaces=[Space("a", "A", "L1"), Space("b", "B", "L1")],
+        cells=[
+            _cell("a:0", 0.0, space_id="a", level_id="L1"),
+            _cell("b:0", 10.0, space_id="b", level_id="L1"),
+        ],
+    )
+
+    report = validate_model(model)
+
+    assert report.valid
+    assert report.stats["surface_semantic_component_count"] == 2
+    assert report.stats["navigation_ready"] is False
+
+
+def test_unauthorized_cross_space_surface_edge_is_invalid() -> None:
+    a = _cell("a:0", 0.0, space_id="a", level_id="L1", neighbors=["b:0"])
+    b = _cell("b:0", 1.0, space_id="b", level_id="L1", neighbors=["a:0"])
+    model = InavModel(
+        levels=[Level("L1", "Level 1", 0.0)],
+        spaces=[Space("a", "A", "L1"), Space("b", "B", "L1")],
+        cells=[a, b],
+    )
+
+    report = validate_model(model)
+
+    assert not report.valid
+    assert report.stats["navigation_ready"] is False
+    assert any(issue.code == "SURFACE_UNAUTHORIZED_SPACE_CROSSING" for issue in report.issues)
+
+
+def test_elevator_semantics_can_connect_separate_surface_components() -> None:
+    model = InavModel(
+        levels=[Level("L1", "Lower", 0.0), Level("L2", "Upper", 3.0)],
+        spaces=[Space("lower", "Lower", "L1"), Space("upper", "Upper", "L2")],
+        portals=[
+            Portal(
+                id="exit:upper",
+                kind="door",
+                position_m=(10.2, 0.2, 3.0),
+                from_space_id="upper",
+                level_id="L2",
+                is_exit=True,
+            )
+        ],
+        transitions=[
+            SemanticTransition(
+                id="elevator:L1:L2",
+                kind="elevator",
+                from_space_id="lower",
+                to_space_id="upper",
+                from_level_id="L1",
+                to_level_id="L2",
+                bidirectional=True,
+                source="ifc",
+                resource_id="elevator:E1",
+            )
+        ],
+        cells=[
+            _cell("lower:0", 0.0, space_id="lower", level_id="L1"),
+            NavCell(
+                id="upper:0",
+                vertices_m=((10.0, 0.0, 3.0), (10.8, 0.0, 3.0), (10.0, 0.8, 3.0)),
+                space_id="upper",
+                level_id="L2",
+                terrain="open",
+            ),
+        ],
+        nodes=[],
+        edges=[],
+    )
+
+    report = validate_model(model)
+
+    assert report.valid
+    assert report.stats["surface_component_count"] == 2
+    assert report.stats["surface_semantic_component_count"] == 1
+    assert report.stats["surface_cross_level_transitions"] >= 1
+    assert report.stats["surface_exit_unreachable_spaces"] == 0
+    assert report.stats["navigation_ready"] is True
