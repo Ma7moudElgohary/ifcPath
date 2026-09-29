@@ -2,11 +2,11 @@
 
 IFCPath is moving from a CPU-projected `QGraphicsScene` preview toward a real GPU rendering architecture suitable for large BIM / Digital Twin models.
 
-This is intentionally incremental. The navigation model, route engines and evacuation simulators do **not** depend on the renderer.
+The navigation model, route engines and evacuation simulators do **not** depend on the renderer.
 
 ## Why WebGPU
 
-The first GPU backend uses `wgpu-py` with `rendercanvas` embedded in PySide6.
+The GPU backend uses `wgpu-py` with `rendercanvas` embedded in PySide6.
 
 Reasons:
 
@@ -33,22 +33,27 @@ Implemented:
 - persistent GPU vertex/index buffers for static BIM/navmesh geometry;
 - camera motion updates only the camera uniform buffer;
 - route polyline in a small dynamic GPU buffer;
+- dynamic GPU overlays for graph edges, portals, exits and Start/Goal markers;
+- dynamic GPU hazard / blocked-space tinting;
+- dynamic blocked-door crosses;
+- dynamic walking-person mesh;
+- dynamic multi-person evacuation rendering;
+- crowd visual LOD: first 36 active occupants use the procedural person mesh, overflow uses lightweight markers;
+- grow-on-demand overlay buffers reused through simulation ticks via `queue.write_buffer()`;
 - final Builder opt-in through `IFCPATH_VIEWPORT=gpu`;
 - automatic fallback to the established Qt projected renderer if WebGPU initialization fails;
 - an offscreen software-WebGPU CI job that actually creates a device, shader pipeline and rendered frame;
 - WebGPU dependencies included in the packaged Windows build.
 
-Not yet GPU-parity:
+Still intentionally pending before GPU becomes the default renderer:
 
-- hazard tint overlays;
-- blocked-door markers;
-- procedural person meshes / evacuation crowds;
-- dense graph overlay;
-- GPU ID-buffer element picking;
-- frustum/occlusion culling;
-- geometry streaming / resident-set budgeting.
+- hardware/Windows surface qualification on representative user machines;
+- GPU ID-buffer IFC element picking / highlighting;
+- frustum and later occlusion culling;
+- geometry streaming / resident-set budgeting;
+- large federated-model performance gates.
 
-Because of those remaining overlays, the normal Builder still defaults to the qualified Qt renderer. GPU mode is explicitly enabled with:
+GPU mode is explicitly enabled with:
 
 ```powershell
 $env:IFCPATH_VIEWPORT="gpu"
@@ -63,6 +68,26 @@ IFCPathBuilder.exe
 ```
 
 If the GPU backend cannot initialize, IFCPath logs the reason and falls back to Qt.
+
+## Static vs dynamic rendering
+
+The viewport deliberately separates long-lived BIM geometry from simulation state:
+
+```text
+IFC BIM + INAV navmesh
+        ↓
+static GPU vertex/index batches
+        ↓
+remain resident while camera moves
+
+route / graph / portals / hazards / people
+        ↓
+small dynamic GPU buffers
+        ↓
+write_buffer() on state changes / simulation ticks
+```
+
+Orbit, pan and zoom never rebuild IFC triangles.
 
 ## Precision model
 
@@ -94,19 +119,19 @@ GPU resident-set manager
             ↓
 WebGPU renderer
             ↓
-ID/depth picking + overlays
+ID/depth picking + dynamic overlays
 ```
 
 The next renderer milestones are:
 
-1. move scenario/hazard/portal/person overlays to dynamic GPU buffers;
-2. switch packaged `auto` mode to GPU after visual parity is qualified;
-3. add AABB frustum culling per batch;
-4. introduce element-ID picking and selection/highlighting;
-5. preserve IFC element/object identity inside render batches;
-6. add GPU instancing/deduplication for repeated geometry;
-7. add a memory-budgeted resident-set / tile streaming layer;
-8. move IFC preview geometry extraction and GPU batch construction fully off the UI thread;
-9. add performance qualification on intentionally large synthetic and real federated models.
+1. qualify the embedded WebGPU surface on Windows hardware and then switch packaged `auto` mode to GPU;
+2. add AABB frustum culling per batch;
+3. introduce GPU ID-buffer element picking and selection/highlighting;
+4. preserve IFC element/object identity through selection and rendering;
+5. add GPU instancing/deduplication for repeated geometry;
+6. add a memory-budgeted resident-set / tile streaming layer;
+7. move IFC preview geometry extraction and GPU batch construction fully off the UI thread;
+8. add performance qualification on intentionally large synthetic and real federated models;
+9. add occlusion culling only after measured profiling shows it is valuable.
 
 The portable INAV schema and routing engines remain independent of all of the above.
