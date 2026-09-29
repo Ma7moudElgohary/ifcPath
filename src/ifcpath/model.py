@@ -66,6 +66,8 @@ class NavCell:
     space_id: str | None = None
     level_id: str | None = None
     neighbor_ids: list[str] = field(default_factory=list)
+    terrain: str = "open"
+    portals: dict[str, tuple[Vec3, Vec3]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

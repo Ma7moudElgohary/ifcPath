@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass
 
 from .model import InavModel
+from .surface_nav import find_surface_route
 
 
 @dataclass(slots=True)
@@ -97,3 +98,12 @@ def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptio
         path.append(prev[path[-1]])
     path.reverse()
     return path
+
+
+
+def find_path_xyz(model: InavModel, start_xyz, goal_xyz, *, terrain_costs=None):
+    """Preferred continuous-surface route API for new consumers.
+
+    The legacy node-ID router remains available during migration.
+    """
+    return find_surface_route(model.cells, start_xyz, goal_xyz, terrain_costs)

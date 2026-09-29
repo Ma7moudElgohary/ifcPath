@@ -10,6 +10,7 @@ from .cdt import build_space_cdt_navmesh
 from .elevator_ifc import add_ifc_elevator_connectors
 from .geometry import build_radius_edges, sample_space_floor_triangles, sample_walkable_triangles
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, Space
+from .surface_nav import connect_cells_by_shared_edges, stitch_surface_seams, surface_components, walkable_surface_cells
 from .obstacles import (
     edge_crosses_obstacle,
     mesh_obstacle_from_triangles,
@@ -195,9 +196,30 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             sampled = sample_walkable_triangles(mesh[0], mesh[1], spacing, options.max_slope_deg)
             points.extend(sampled)
             point_kinds.extend([kind] * len(sampled))
-            point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
+            vertical_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
+            point_levels.extend([vertical_level_id] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
             point_cell_ids.extend([None] * len(sampled))
+
+            # New authoritative continuous-surface representation. Keep sampled
+            # nodes during migration so existing INAV consumers remain usable.
+            vertical_cells = walkable_surface_cells(
+                mesh[0],
+                mesh[1],
+                id_prefix=f"cell:{kind}:{getattr(entity, 'GlobalId', entity.id())}",
+                terrain=kind,
+                max_slope_deg=options.max_slope_deg,
+                level_id=vertical_level_id,
+            )
+            out.cells.extend(vertical_cells)
+
+    # Rebuild adjacency globally: floor CDT cells already contain local
+    # neighbours, while stair/ramp cells come from independent IFC elements.
+    # Shared-edge adjacency plus conservative seam stitching forms one 3D
+    # walkable surface without inventing long proximity links.
+    connect_cells_by_shared_edges(out.cells)
+    surface_seams = stitch_surface_seams(out.cells)
+    surface_parts = surface_components(out.cells)
 
     out.nodes = []
     for i, p in enumerate(points):
