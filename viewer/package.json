@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@thatopen/components": "latest",
@@ -17,6 +18,7 @@
     "web-ifc": "latest"
   },
   "devDependencies": {
+    "@playwright/test": "latest",
     "typescript": "latest",
     "vite": "latest",
     "@types/three": "latest"
