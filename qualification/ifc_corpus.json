@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "description": "Pinned public IFC qualification corpus. Sources are immutable and license-reviewed; large Git LFS cases use media.githubusercontent.com plus the LFS SHA-256 object id.",
+  "defaults": {
+    "timeout_seconds": 180,
+    "build_options": {
+      "floor_backend": "cdt",
+      "floor_spacing_m": 0.8,
+      "stair_spacing_m": 0.25,
+      "connect_distance_m": 1.25
+    }
+  },
+  "cases": [
+    {
+      "id": "bsc-duplex-revit-ifc2x3",
+      "name": "buildingSMART Duplex Apartment (Revit IFC2x3)",
+      "source": {
+        "repository": "buildingsmart-community/Community-Sample-Test-Files",
+        "commit": "7ddf57a201f88a0c213d5322b02ed15e94a60a40",
+        "path": "IFC 2.3.0.1 (IFC 2x3)/Duplex Apartment/Duplex_A_20110907.ifc",
+        "url": "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%202.3.0.1%20(IFC%202x3)/Duplex%20Apartment/Duplex_A_20110907.ifc",
+        "sha256": "b347a2c8aa8fff6db896a4417a9c50c22ac0ccd7c5cfc22b99b8d29336c606ed",
+        "size_bytes": 2380763,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingsmart-community/Community-Sample-Test-Files/blob/7ddf57a201f88a0c213d5322b02ed15e94a60a40/README.md",
+        "redistributable": true
+      },
+      "schema": "IFC2X3",
+      "authoring_source": "Autodesk Revit Architecture 2011",
+      "expected_outcome": "PASS-NAV",
+      "tiers": [1, 2, 3],
+      "tags": ["real-building", "residential", "multistorey", "spaces", "doors", "stairs", "revit", "ifc2x3"],
+      "build_options": {
+        "floor_spacing_m": 1.0,
+        "stair_spacing_m": 0.25,
+        "connect_distance_m": 1.5
+      },
+      "expect": {
+        "min_levels": 2,
+        "min_spaces": 5,
+        "navigation_ready": true,
+        "require_multilevel_route": true
+      }
+    },
+    {
+      "id": "bsc-cert-simple-ifc2x3",
+      "name": "buildingSMART Certification Simple Scene Architecture IFC2x3",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 2.3.0.1 (IFC 2x3 TC1)/Simple-Scene/Building-Architecture.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%202.3.0.1%20(IFC%202x3%20TC1)/Simple-Scene/Building-Architecture.ifc",
+        "git_blob_sha1": "07f1b8014e74b950037f53a0547ded51b435953f",
+        "size_bytes": 92542,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC2X3",
+      "authoring_source": "SketchUp 2026 / Sketchup IFC Manager",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [1, 2, 3],
+      "tags": ["small", "architecture", "spaces", "rotated-placement", "millimetres", "ifc2x3"]
+    },
+    {
+      "id": "bsc-cert-simple-ifc4",
+      "name": "buildingSMART Certification Simple Scene Architecture IFC4",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 4.0.2.1 (IFC 4)/Simple-Scene/Building-Architecture.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Simple-Scene/Building-Architecture.ifc",
+        "git_blob_sha1": "ad4090b7fbdf7ab640e6bc66d3c66c086e9dc9dd",
+        "size_bytes": 142325,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "buildingSMART Certification dataset",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [1, 2, 3],
+      "tags": ["small", "architecture", "spaces", "ifc4"]
+    },
+    {
+      "id": "bsc-cert-simple-ifc4x3",
+      "name": "buildingSMART Certification Simple Scene Architecture IFC4x3",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 4.3.2.0 (IFC 4.3 ADD2)/Simple-Scene/Building-Architecture.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.3.2.0%20(IFC%204.3%20ADD2)/Simple-Scene/Building-Architecture.ifc",
+        "git_blob_sha1": "5b3509f37ca99ae1e889c9b10b0d79b809557f80",
+        "size_bytes": 141965,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC4X3_ADD2",
+      "authoring_source": "buildingSMART Certification dataset",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["small", "architecture", "schema-probe", "ifc4x3"]
+    },
+    {
+      "id": "bsc-cert-wall-opening-window-ifc4",
+      "name": "buildingSMART Certification Wall with Opening and Window IFC4",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 4.0.2.1 (IFC 4)/Reference View/wall-with-opening-and-window.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Reference%20View/wall-with-opening-and-window.ifc",
+        "git_blob_sha1": "8820193e625f693712be860d79291a0ee48eacd7",
+        "size_bytes": 12492,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "buildingSMART Certification dataset",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [1, 2],
+      "tags": ["tiny", "geometry", "opening", "window", "no-spaces", "ifc4"]
+    },
+    {
+      "id": "bsc-cert-basin-tessellation-ifc4",
+      "name": "buildingSMART Certification Basin Tessellation IFC4",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 4.0.2.1 (IFC 4)/Reference View/basin-tessellation.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Reference%20View/basin-tessellation.ifc",
+        "git_blob_sha1": "6598b39f682850f1af7a80df0fec32d3137fad89",
+        "size_bytes": 12131,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "buildingSMART Certification dataset",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["tiny", "tessellation", "geometry", "no-spaces", "ifc4"]
+    },
+    {
+      "id": "bsc-cert-structural-ifc2x3",
+      "name": "buildingSMART Certification Structural Model IFC2x3",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 2.3.0.1 (IFC 2x3 TC1)/Simple-Scene/Building-Structural.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%202.3.0.1%20(IFC%202x3%20TC1)/Simple-Scene/Building-Structural.ifc",
+        "git_blob_sha1": "fad27d36546343908439ea0b295db1c82db797b2",
+        "size_bytes": 109012,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC2X3",
+      "authoring_source": "buildingSMART Certification dataset",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["small", "structural", "geometry-only", "ifc2x3"]
+    },
+    {
+      "id": "bsc-cert-structural-ifc4",
+      "name": "buildingSMART Certification Structural Model IFC4",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 4.0.2.1 (IFC 4)/Simple-Scene/Building-Structural.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Simple-Scene/Building-Structural.ifc",
+        "git_blob_sha1": "0a0fc46360cd713fb92cf424f134356dc868a103",
+        "size_bytes": 185185,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "buildingSMART Certification dataset",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["small", "structural", "geometry-only", "ifc4"]
+    },
+    {
+      "id": "bsc-cert-structural-ifc4x3",
+      "name": "buildingSMART Certification Structural Model IFC4x3",
+      "source": {
+        "repository": "buildingSMART/Certification-datasets",
+        "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
+        "path": "IFC 4.3.2.0 (IFC 4.3 ADD2)/Simple-Scene/Building-Structural.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.3.2.0%20(IFC%204.3%20ADD2)/Simple-Scene/Building-Structural.ifc",
+        "git_blob_sha1": "362372ffaf13f592a1c45d9ed8420423a177cea9",
+        "size_bytes": 185139,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingSMART/Certification-datasets/blob/80d976a9b193a26a8e928c3e79bff67af1de68a8/LICENSE",
+        "redistributable": true
+      },
+      "schema": "IFC4X3_ADD2",
+      "authoring_source": "buildingSMART Certification dataset",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["small", "structural", "schema-probe", "ifc4x3"]
+    },
+    {
+      "id": "thatopen-webifc-example",
+      "name": "That Open WebIFC Revit 2021 Example",
+      "source": {
+        "repository": "ThatOpen/engine_web-ifc",
+        "commit": "bdcec3e0206ae7fb482f149be44ac6a150bf03d2",
+        "path": "examples/example.ifc",
+        "url": "https://raw.githubusercontent.com/ThatOpen/engine_web-ifc/bdcec3e0206ae7fb482f149be44ac6a150bf03d2/examples/example.ifc",
+        "git_blob_sha1": "55a27807218b3d9076fd9be09dd51d4b7279df4a",
+        "size_bytes": 413681,
+        "license": "MPL-2.0",
+        "license_url": "https://github.com/ThatOpen/engine_web-ifc/blob/bdcec3e0206ae7fb482f149be44ac6a150bf03d2/LICENSE.md",
+        "redistributable": true
+      },
+      "schema": "IFC2X3",
+      "authoring_source": "Autodesk Revit 2021",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [1, 2, 3],
+      "tags": ["small", "revit", "webifc", "large-coordinates", "multistorey", "ifc2x3"]
+    },
+    {
+      "id": "bsc-clinic-architecture-ifc2x3",
+      "name": "buildingSMART Medical-Dental Clinic Architecture IFC2x3",
+      "source": {
+        "repository": "buildingsmart-community/Community-Sample-Test-Files",
+        "commit": "7ddf57a201f88a0c213d5322b02ed15e94a60a40",
+        "path": "IFC 2.3.0.1 (IFC 2x3)/Medical-Dental Clinic/Clinic_Architectural.ifc",
+        "url": "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%202.3.0.1%20(IFC%202x3)/Medical-Dental%20Clinic/Clinic_Architectural.ifc",
+        "sha256": "2ac970ce065ecac4e0c9e5f453a257169e90d0067f419b7e33533a64ef837880",
+        "size_bytes": 13003205,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingsmart-community/Community-Sample-Test-Files/blob/7ddf57a201f88a0c213d5322b02ed15e94a60a40/README.md",
+        "redistributable": true
+      },
+      "schema": "IFC2X3",
+      "authoring_source": "buildingSMART community clinic model",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "timeout_seconds": 600,
+      "tags": ["large", "clinic", "architecture", "many-elements", "performance", "ifc2x3"]
+    }
+  ]
+}
