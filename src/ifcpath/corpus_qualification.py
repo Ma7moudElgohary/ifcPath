@@ -15,6 +15,7 @@ from .hierarchical_routing import find_hierarchical_path
 from .ifc_loader import BuildOptions, build_from_ifc
 from .surface_funnel import find_surface_funnel_route
 from .validation import validate_model
+from .vertical_surface import find_surface_vertical_transfer
 
 try:  # resource is unavailable on Windows, where qualification may still be run manually.
     import resource
@@ -24,6 +25,7 @@ except ImportError:  # pragma: no cover - exercised on Windows
 
 _SCHEMA_RE = re.compile(rb"FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'", re.IGNORECASE)
 _VERTICAL_KINDS = {"stair", "ramp", "elevator", "escalator"}
+_SURFACE_VERTICAL_KINDS = {"stair", "ramp", "escalator", "vertical"}
 
 
 @dataclass(slots=True)
@@ -240,6 +242,7 @@ def _route_metrics(model) -> dict[str, Any]:
         "representative_route_exists": False,
         "multilevel_route_attempted": False,
         "multilevel_route_exists": False,
+        "surface_vertical_transfer_exists": False,
     }
 
     by_space: dict[str, list[Any]] = {}
@@ -268,30 +271,104 @@ def _route_metrics(model) -> dict[str, Any]:
             })
         break
 
+    # Prefer authored/recovered semantic vertical transfers over arbitrary
+    # lowest/highest-level endpoints. A building may contain foundation, roof,
+    # service or disconnected site levels that are not part of an occupant
+    # circulation domain; choosing those extremes creates a false failure.
+    surface_transitions = [
+        transition
+        for transition in model.transitions
+        if transition.source == "surface_vertical_touch"
+        and transition.kind in _SURFACE_VERTICAL_KINDS
+    ]
+    if surface_transitions:
+        metrics["multilevel_route_attempted"] = True
+    for transition in surface_transitions:
+        transfer = find_surface_vertical_transfer(model, transition)
+        if transfer is None or len(transfer.points) < 2:
+            continue
+        rise = abs(transfer.points[-1][2] - transfer.points[0][2])
+        metrics.update({
+            "surface_vertical_transfer_exists": True,
+            "surface_vertical_transition_id": transition.id,
+            "surface_vertical_kind": transition.kind,
+            "surface_vertical_length_m": transfer.length_m,
+            "surface_vertical_rise_m": rise,
+            "surface_vertical_cell_count": len(transfer.cell_ids),
+        })
+        route = find_hierarchical_path(model, transfer.points[0], transfer.points[-1])
+        if route is not None:
+            _record_multilevel_route(metrics, route, transfer.points[0], transfer.points[-1], "surface_vertical_touch")
+            return metrics
+
+    # Explicit resources such as elevators may not have a walkable vertical
+    # surface. Try endpoints from the transition's actual from/to spaces before
+    # falling back to generic level pairs.
+    cross_level = [
+        transition for transition in model.transitions
+        if transition.from_level_id
+        and transition.to_level_id
+        and transition.from_level_id != transition.to_level_id
+        and transition.from_space_id
+        and transition.to_space_id
+    ]
+    if cross_level:
+        metrics["multilevel_route_attempted"] = True
+    for transition in cross_level:
+        start_cell = _representative_space_cell(by_space, transition.from_space_id)
+        goal_cell = _representative_space_cell(by_space, transition.to_space_id)
+        if start_cell is None or goal_cell is None:
+            continue
+        start = _centroid(start_cell)
+        goal = _centroid(goal_cell)
+        route = find_hierarchical_path(model, start, goal)
+        if route is not None:
+            _record_multilevel_route(metrics, route, start, goal, "semantic_transition")
+            return metrics
+
+    # Last-resort diagnostic for models whose vertical semantics have not yet
+    # been recovered. Keep this bounded: one representative cell per surfaced
+    # level and at most 12 cross-level attempts.
     level_cells: dict[str, list[Any]] = {}
     for cell in model.cells:
         if cell.level_id and cell.space_id and cell.terrain == "open":
             level_cells.setdefault(cell.level_id, []).append(cell)
     levels = [level for level in model.levels if level.id in level_cells]
     levels.sort(key=lambda level: level.elevation_m)
-    if len(levels) >= 2:
-        low = levels[0]
-        high = levels[-1]
-        start = _centroid(max(level_cells[low.id], key=lambda cell: _triangle_area_xy(cell.vertices_m)))
-        goal = _centroid(max(level_cells[high.id], key=lambda cell: _triangle_area_xy(cell.vertices_m)))
-        metrics["multilevel_route_attempted"] = True
-        route = find_hierarchical_path(model, start, goal)
-        if route is not None:
-            metrics.update({
-                "multilevel_route_exists": True,
-                "multilevel_route_length_m": route.length_m,
-                "multilevel_weighted_cost": route.weighted_cost,
-                "multilevel_transition_ids": list(route.transition_ids),
-                "multilevel_transition_count": len(route.transition_ids),
-                "multilevel_segment_kinds": [segment.kind for segment in route.segments],
-                "multilevel_vertical_rise_m": abs(goal[2] - start[2]),
-            })
+    attempts = 0
+    for left_index, low in enumerate(levels):
+        for high in levels[left_index + 1:]:
+            metrics["multilevel_route_attempted"] = True
+            start = _centroid(max(level_cells[low.id], key=lambda cell: _triangle_area_xy(cell.vertices_m)))
+            goal = _centroid(max(level_cells[high.id], key=lambda cell: _triangle_area_xy(cell.vertices_m)))
+            route = find_hierarchical_path(model, start, goal)
+            attempts += 1
+            if route is not None:
+                _record_multilevel_route(metrics, route, start, goal, "level_pair_fallback")
+                return metrics
+            if attempts >= 12:
+                return metrics
     return metrics
+
+
+def _record_multilevel_route(metrics: dict[str, Any], route, start, goal, source: str) -> None:
+    metrics.update({
+        "multilevel_route_exists": True,
+        "multilevel_route_source": source,
+        "multilevel_route_length_m": route.length_m,
+        "multilevel_weighted_cost": route.weighted_cost,
+        "multilevel_transition_ids": list(route.transition_ids),
+        "multilevel_transition_count": len(route.transition_ids),
+        "multilevel_segment_kinds": [segment.kind for segment in route.segments],
+        "multilevel_vertical_rise_m": abs(goal[2] - start[2]),
+    })
+
+
+def _representative_space_cell(by_space: dict[str, list[Any]], space_id: str):
+    cells = by_space.get(space_id, ())
+    if not cells:
+        return None
+    return max(cells, key=lambda cell: _triangle_area_xy(cell.vertices_m))
 
 
 def _centroid(cell) -> tuple[float, float, float]:
