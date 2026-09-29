@@ -195,7 +195,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             sampled = sample_walkable_triangles(mesh[0], mesh[1], spacing, options.max_slope_deg)
             points.extend(sampled)
             point_kinds.extend([kind] * len(sampled))
-            point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
+            vertical_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
+            point_levels.extend([vertical_level_id] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
             point_cell_ids.extend([None] * len(sampled))
 
@@ -265,6 +266,11 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         candidate_filter=candidate_allowed,
     ):
         out.edges.append(NavEdge(a=f"n:{i}", b=f"n:{j}", distance_m=d, kind="walk"))
+
+    vertical_landing_edges = _attach_vertical_landings(
+        out,
+        max_distance_m=max(options.connect_distance_m * 2.0, 2.5),
+    )
 
     blocked_walk_edges = len(obstacle_rejections)
     semantic_cross_space_edges = len(semantic_rejections)
@@ -396,6 +402,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "geometry_inferred_portals": inferred_portal_count,
         "wall_obstacle_count": len(wall_obstacles),
         "blocked_walk_edges": blocked_walk_edges,
+        "vertical_landing_edges": vertical_landing_edges,
         "semantic_cross_space_edges_removed": semantic_cross_space_edges,
         "elevator_transport_count": elevator_stats.detected,
         "elevator_connector_count": elevator_stats.connected,
@@ -404,6 +411,75 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "generator": "ifcpath",
     })
     return out
+
+
+def _attach_vertical_landings(out: InavModel, max_distance_m: float) -> int:
+    """Attach each stair/ramp endpoint to the nearest walk node on its level.
+
+    Generic radius connectivity is intentionally local and can miss a landing
+    when tessellation centroids sit farther from the flight endpoint. Vertical
+    circulation needs an explicit semantic-quality attachment, constrained by
+    level and distance, so a valid flight is not silently disconnected.
+    """
+    vertical_ids = {
+        node.id for node in out.nodes if node.kind in {"stair", "ramp"}
+    }
+    if not vertical_ids:
+        return 0
+    node_by_id = {node.id: node for node in out.nodes}
+    adjacency = {node_id: set() for node_id in vertical_ids}
+    for edge in out.edges:
+        if edge.a in vertical_ids and edge.b in vertical_ids:
+            adjacency[edge.a].add(edge.b)
+            adjacency[edge.b].add(edge.a)
+
+    added = 0
+    remaining = set(vertical_ids)
+    while remaining:
+        start = remaining.pop()
+        component = {start}
+        queue = [start]
+        while queue:
+            current = queue.pop()
+            for neighbour in adjacency.get(current, ()):
+                if neighbour in remaining:
+                    remaining.remove(neighbour)
+                    component.add(neighbour)
+                    queue.append(neighbour)
+
+        vertical_nodes = [node_by_id[node_id] for node_id in component]
+        levels = {node.level_id for node in vertical_nodes if node.level_id}
+        for level_id in levels:
+            level_vertical = [node for node in vertical_nodes if node.level_id == level_id]
+            walk_nodes = [
+                node for node in out.nodes
+                if node.kind == "walk" and node.level_id == level_id and node.space_id
+            ]
+            if not level_vertical or not walk_nodes:
+                continue
+            best = min(
+                (
+                    (_dist(vertical.position_m, walk.position_m), vertical, walk)
+                    for vertical in level_vertical for walk in walk_nodes
+                ),
+                key=lambda item: (item[0], item[1].id, item[2].id),
+            )
+            distance, vertical, walk = best
+            if distance > max_distance_m:
+                continue
+            if any(
+                {edge.a, edge.b} == {vertical.id, walk.id}
+                for edge in out.edges
+            ):
+                continue
+            out.edges.append(NavEdge(
+                a=vertical.id,
+                b=walk.id,
+                distance_m=distance,
+                kind=vertical.kind,
+            ))
+            added += 1
+    return added
 
 
 def _fixed_obstacles(model, class_names: tuple[str, ...]):
