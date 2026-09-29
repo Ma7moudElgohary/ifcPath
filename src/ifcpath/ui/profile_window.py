@@ -34,8 +34,9 @@ class IFCPathProfileWindow(IFCPathEvacuationWindow):
             self.route_profile_combo.addItem(profile.label, profile.id)
         self.route_profile_combo.setToolTip(
             "Profiles filter semantic transitions without changing the INAV model. "
-            "Accessible excludes stairs/escalators; the conservative emergency "
-            "responder profile excludes elevators."
+            "Accessible excludes stairs/escalators and ambiguous vertical connectors; "
+            "the conservative emergency responder profile excludes elevators and "
+            "ambiguous vertical connectors."
         )
         self.route_profile_combo.currentIndexChanged.connect(self._route_profile_changed)
         group_layout.addWidget(self.route_profile_combo)
@@ -82,6 +83,13 @@ class IFCPathProfileWindow(IFCPathEvacuationWindow):
             self._calculate_route(route_start=current, preserve_running=was_running)
         self._append_log(f"PROFILE: {profile.label} ({profile.id})")
 
+    def _profiled_model(self):
+        return (
+            None
+            if self._model is None
+            else model_for_route_profile(self._model, self._route_profile_id())
+        )
+
     def _calculate_route(self, *, route_start=None, preserve_running: bool = False) -> None:
         original_model = self._model
         if original_model is None:
@@ -96,6 +104,28 @@ class IFCPathProfileWindow(IFCPathEvacuationWindow):
                 route_start=route_start,
                 preserve_running=preserve_running,
             )
+        finally:
+            self._model = original_model
+
+    def _prepare_evacuation(self) -> None:
+        """Prepare population and simulator against one consistent policy view.
+
+        Automatic population generation tests baseline egress reachability. It
+        therefore must see the same profile-filtered topology as the simulator;
+        otherwise a step-free run could auto-spawn occupants in a stair-only
+        region and report policy-created trapping as a building defect.
+        """
+        original_model = self._model
+        if original_model is None:
+            return super()._prepare_evacuation()
+
+        self._model = model_for_route_profile(original_model, self._route_profile_id())
+        try:
+            # While the profiled model is installed, _create_evacuation_simulator
+            # below sees it as canonical for this preparation. It will make one
+            # additional shallow policy view, which is safe and preserves the
+            # source INAV object.
+            super()._prepare_evacuation()
         finally:
             self._model = original_model
 
