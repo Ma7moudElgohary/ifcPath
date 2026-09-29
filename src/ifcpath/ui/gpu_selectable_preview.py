@@ -6,8 +6,8 @@ import math
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QMouseEvent
 
-from .gpu_scenario_preview import GpuScenarioPreview
 from .gpu_selection import BimSelectionIndex, ElementSelectionHit
+from .gpu_streaming_preview import GpuStreamingScenarioPreview
 
 try:
     import wgpu
@@ -15,14 +15,14 @@ except Exception:  # pragma: no cover - parent backend already handles availabil
     wgpu = None
 
 
-class GpuSelectableScenarioPreview(GpuScenarioPreview):
-    """Scenario-capable WebGPU viewport with IFC element selection.
+class GpuSelectableScenarioPreview(GpuStreamingScenarioPreview):
+    """Streaming WebGPU viewport with IFC element selection.
 
     Selection is intentionally separated from navigation picking. Start/goal
     mode keeps using authoritative CDT cells; a normal left click uses a BIM BVH
     and returns the IFC GlobalId + metadata. The selected object's bounds are
-    drawn through the existing small dynamic line buffer so static BIM buffers
-    remain resident.
+    drawn through the existing small dynamic line buffer while the static BIM
+    resident set remains memory-budgeted.
     """
 
     elementSelected = Signal(object)
