@@ -13,8 +13,9 @@ def create_preview(kind: PreviewKind, parent=None) -> QWidget:
 
     ``IFCPATH_VIEWPORT=gpu`` selects the new WebGPU backend. Any import, adapter,
     surface or device failure falls back to the established Qt projection.
-    Until full GPU overlay parity is complete, ``auto`` intentionally resolves
-    to Qt; this keeps existing packaged behavior deterministic.
+    ``auto`` intentionally resolves to Qt until Windows hardware qualification is
+    complete. A successfully created GPU renderer advertises a larger bounded IFC
+    preview budget; a fallback Qt renderer keeps the original 18k budget.
     """
 
     preference = os.environ.get("IFCPATH_VIEWPORT", "qt").strip().lower()
@@ -29,6 +30,7 @@ def create_preview(kind: PreviewKind, parent=None) -> QWidget:
 
                 preview = GpuBimPreview(parent)
             setattr(preview, "gpu_requested", True)
+            setattr(preview, "preferred_preview_triangle_budget", 250_000)
             return preview
         except Exception as exc:
             preview = _qt_preview(kind, parent)
