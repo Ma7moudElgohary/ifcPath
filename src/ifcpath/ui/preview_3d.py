@@ -192,7 +192,7 @@ class Projected3DPreview(QGraphicsView):
 
     def reset_view(self) -> None:
         self._reset_orbit_target()
-        self.redraw(fit=True)
+        self.redraw(fit=True, interactive=False)
 
     def project_world(self, point: Vec3) -> tuple[QPointF, float]:
         return self._project(point)
@@ -281,9 +281,14 @@ class Projected3DPreview(QGraphicsView):
             self._navigation.interactive_portal_limit,
         )
 
+    def _navigation_is_active(self) -> bool:
+        return self._orbit_last is not None or self._settle_timer.isActive()
+
     # ---------- rendering ----------
 
-    def redraw(self, *, fit: bool, interactive: bool = False) -> None:
+    def redraw(self, *, fit: bool, interactive: bool | None = None) -> None:
+        if interactive is None:
+            interactive = self._navigation_is_active()
         self._interactive_lod = bool(interactive)
         self.setRenderHint(QPainter.Antialiasing, not self._interactive_lod)
         self._scene.clear()
@@ -630,7 +635,7 @@ class Projected3DPreview(QGraphicsView):
             if picked is not None:
                 world, _space_id, _level_id = picked
                 self._center = world
-                self.redraw(fit=False)
+                self.redraw(fit=False, interactive=False)
                 self.centerOn(0.0, 0.0)
                 current = abs(self.transform().m11())
                 desired = max(current, self._fit_scale * 2.2)
