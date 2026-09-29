@@ -99,3 +99,28 @@ def test_validation_rejects_broken_semantic_transition_reference():
     assert not report.valid
     assert report.stats["semantic_transition_errors"] == 1
     assert any(issue.code == "TRANSITION_UNKNOWN_TO_SPACE" for issue in report.issues)
+
+
+def test_disconnected_warning_model_is_not_navigation_ready():
+    model = InavModel(
+        nodes=[
+            NavNode(id="a", position_m=(0.0, 0.0, 0.0)),
+            NavNode(id="b", position_m=(10.0, 0.0, 0.0)),
+        ],
+    )
+    report = validate_model(model)
+    assert report.valid
+    assert report.stats["navigation_ready"] is False
+
+
+def test_connected_single_level_model_is_navigation_ready():
+    model = InavModel(
+        nodes=[
+            NavNode(id="a", position_m=(0.0, 0.0, 0.0)),
+            NavNode(id="b", position_m=(1.0, 0.0, 0.0)),
+        ],
+        edges=[NavEdge(a="a", b="b", distance_m=1.0)],
+    )
+    report = validate_model(model)
+    assert report.valid
+    assert report.stats["navigation_ready"] is True
