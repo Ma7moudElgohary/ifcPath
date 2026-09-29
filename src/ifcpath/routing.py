@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 
 from .model import InavModel
-from .surface_nav import find_surface_route
+from .surface_funnel import find_surface_funnel_route
 from .surface_portals import bind_semantic_surface_portals
 
 
@@ -98,16 +98,18 @@ def find_path_xyz(
     terrain_costs=None,
     blocked_portals: set[str] | None = None,
 ):
-    """Route arbitrary XYZ points over the authoritative continuous surface.
+    """Return a Pathfinder-style funnel centreline through the 3D surface.
 
-    Semantic doors are bound lazily and idempotently. ``blocked_portals``
-    disables those exact door crossings without rebuilding navigation geometry.
+    Semantic doors are bound lazily and idempotently. A* chooses a weighted
+    polygon-cell corridor; the classic funnel then pulls a geometrically short
+    path through the full portal segments instead of visiting their midpoints.
     """
     bind_semantic_surface_portals(model)
-    return find_surface_route(
+    route = find_surface_funnel_route(
         model.cells,
         start_xyz,
         goal_xyz,
-        terrain_costs,
+        terrain_costs=terrain_costs,
         blocked_portal_ids=blocked_portals,
     )
+    return [] if route is None else route.points
