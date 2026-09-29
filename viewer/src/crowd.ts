@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone } from "three/examples/jsm/utils/SkeletonUtils.js";
+import { AgentVisual, InstancedAgentRenderer } from "./agent-instancing";
 
 export type CrowdRoute = THREE.Vector3[];
 
@@ -17,8 +18,16 @@ type SimpleAgent = {
   segment: number;
   speed: number;
   position: THREE.Vector3;
+  visual: AgentVisual;
 };
 
+/**
+ * Route-demo crowd visualization.
+ *
+ * A small number of loaded GLB humans may use skeletal animation; all remaining
+ * pedestrians go through the same high-count instanced LOD path as solver
+ * playback. The navigation/simulation model never depends on a particular mesh.
+ */
 export class CrowdLayer {
   private detailed: DetailedAgent[] = [];
   private simple: SimpleAgent[] = [];
@@ -26,20 +35,12 @@ export class CrowdLayer {
   private humanAnimations: THREE.AnimationClip[] = [];
   private paused = false;
   private speedMultiplier = 1;
-  private readonly maxAnimatedHumans = 64;
-  private readonly simpleCapacity = 2000;
-  private readonly simpleMesh: THREE.InstancedMesh;
-  private readonly matrix = new THREE.Matrix4();
+  private readonly maxAnimatedHumans = 32;
+  private readonly simpleCapacity = 20_000;
+  private readonly instances: InstancedAgentRenderer;
 
   constructor(private scene: THREE.Scene) {
-    this.simpleMesh = new THREE.InstancedMesh(
-      new THREE.CapsuleGeometry(0.20, 0.90, 3, 6),
-      new THREE.MeshStandardMaterial({ roughness: 0.9 }),
-      this.simpleCapacity,
-    );
-    this.simpleMesh.count = 0;
-    this.simpleMesh.name = "IfcPath instanced crowd";
-    this.scene.add(this.simpleMesh);
+    this.instances = new InstancedAgentRenderer(scene, this.simpleCapacity, 256, 2_048);
   }
 
   async loadHuman(file: File) {
@@ -47,17 +48,16 @@ export class CrowdLayer {
     const url = URL.createObjectURL(file);
     try {
       const gltf = await loader.loadAsync(url);
-      this.humanTemplate = gltf.scene;
-      this.humanAnimations = gltf.animations;
-      this.humanTemplate.traverse((object) => {
-        if (object instanceof THREE.Mesh) {
-          object.castShadow = true;
-          object.receiveShadow = true;
-        }
-      });
+      this.useLoadedHuman(gltf.scene, gltf.animations);
     } finally {
       URL.revokeObjectURL(url);
     }
+  }
+
+  /** Load a replaceable GLB/GLTF asset without coupling simulation to its source. */
+  async loadHumanUrl(url: string) {
+    const gltf = await new GLTFLoader().loadAsync(url);
+    this.useLoadedHuman(gltf.scene, gltf.animations);
   }
 
   setPaused(paused: boolean) {
@@ -75,8 +75,7 @@ export class CrowdLayer {
     }
     this.detailed = [];
     this.simple = [];
-    this.simpleMesh.count = 0;
-    this.simpleMesh.instanceMatrix.needsUpdate = true;
+    this.instances.clear();
   }
 
   spawnRouteAgents(route: CrowdRoute, count: number) {
@@ -100,14 +99,21 @@ export class CrowdLayer {
     }
 
     for (let i = detailedCount; i < total; i++) {
+      const position = route[0].clone().add(this.lateralOffset(route, i));
+      const visual: AgentVisual = {
+        position,
+        yaw: 0,
+        color: 0x607a8c,
+        scale: 0.94 + (i % 9) * 0.012,
+      };
       this.simple.push({
         route,
         segment: 0,
         speed: 1.05 + (i % 7) * 0.07,
-        position: route[0].clone().add(this.lateralOffset(route, i)),
+        position,
+        visual,
       });
     }
-    this.simpleMesh.count = this.simple.length;
     this.flushInstances();
   }
 
@@ -121,6 +127,25 @@ export class CrowdLayer {
     }
     for (const agent of this.simple) this.advance(agent.position, agent.route, agent, scaledDt);
     this.flushInstances();
+  }
+
+  get agentCount() {
+    return this.detailed.length + this.simple.length;
+  }
+
+  get lodStats() {
+    return this.instances.stats;
+  }
+
+  private useLoadedHuman(scene: THREE.Group, animations: THREE.AnimationClip[]) {
+    this.humanTemplate = scene;
+    this.humanAnimations = animations;
+    this.humanTemplate.traverse((object) => {
+      if (object instanceof THREE.Mesh) {
+        object.castShadow = true;
+        object.receiveShadow = true;
+      }
+    });
   }
 
   private advance(
@@ -152,9 +177,9 @@ export class CrowdLayer {
   private faceNext(object: THREE.Object3D, route: CrowdRoute, segment: number) {
     if (route.length < 2) return;
     const next = route[Math.min(segment + 1, route.length - 1)];
-    const direction = next.clone().sub(object.position);
-    direction.y = 0;
-    if (direction.lengthSq() > 1e-6) object.rotation.y = Math.atan2(direction.x, direction.z);
+    const dx = next.x - object.position.x;
+    const dz = next.z - object.position.z;
+    if (dx * dx + dz * dz > 1e-6) object.rotation.y = Math.atan2(dx, dz);
   }
 
   private lateralOffset(route: CrowdRoute, index: number) {
@@ -166,17 +191,12 @@ export class CrowdLayer {
   }
 
   private flushInstances() {
-    for (let i = 0; i < this.simple.length; i++) {
-      const agent = this.simple[i];
+    for (const agent of this.simple) {
       const next = agent.route[Math.min(agent.segment + 1, agent.route.length - 1)] ?? agent.position;
-      const direction = next.clone().sub(agent.position).setY(0);
-      const rotation = new THREE.Quaternion();
-      if (direction.lengthSq() > 1e-6) {
-        rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(direction.x, direction.z));
-      }
-      this.matrix.compose(agent.position, rotation, new THREE.Vector3(1, 1, 1));
-      this.simpleMesh.setMatrixAt(i, this.matrix);
+      const dx = next.x - agent.position.x;
+      const dz = next.z - agent.position.z;
+      agent.visual.yaw = dx * dx + dz * dz > 1e-6 ? Math.atan2(dx, dz) : 0;
     }
-    this.simpleMesh.instanceMatrix.needsUpdate = true;
+    this.instances.update(this.simple.map((agent) => agent.visual));
   }
 }

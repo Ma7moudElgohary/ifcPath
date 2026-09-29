@@ -91,11 +91,34 @@ Example `agents.json`:
 
 Load `playback.json` with **Solver playback**. Agent colors indicate moving/transfer/waiting/elevator/evacuated/trapped state.
 
-## Human assets
+## Human assets and crowd LOD
 
-The route-demo crowd renderer is asset-independent. **Kenney Mini Characters** is the current lightweight CC0 starter reference. Keep third-party binary assets outside the geometry kernel and swap them through the Human GLB input or a deployment asset pipeline.
+The crowd renderer is asset-independent. **Kenney Mini Characters** is the current lightweight starter reference; Kenney publishes the pack under **CC0**. Keep third-party binary assets outside the geometry kernel and swap them through the Human GLB input, `CrowdLayer.loadHumanUrl(...)`, or a deployment asset pipeline.
 
-Solver playback uses an efficient instanced representation so thousands of recorded agent positions can be inspected without requiring one skeleton per pedestrian.
+The production crowd path is tiered:
+
+- a small foreground cohort may use real skeletal GLB animation;
+- the first instanced LOD uses low-poly capsules;
+- the middle LOD uses cheaper cylinders;
+- the large/background LOD uses very cheap cone silhouettes;
+- solver playback and route-demo crowds share the same instancing implementation;
+- playback supports up to **20,000 visible agents** without creating an Object3D for every pedestrian.
+
+The microscopic solver remains authoritative for positions and state. Rendering LOD never changes navigation, collision avoidance or simulation results.
+
+## Performance benchmark
+
+`benchmark.html` is built with the normal viewer and exercises the exact production instanced renderer at:
+
+- 100 agents
+- 500 agents
+- 1,000 agents
+- 5,000 agents
+- 10,000 agents
+
+For each stage it records median and P95 frame time plus average/P95 FPS. Results can be exported as `ifcpath-viewer-benchmark.json` so different GPUs/browsers can be compared without guessing.
+
+With the dev server running, open `/benchmark.html` and press **Run 100 → 10,000 agents**.
 
 ## Viewer development
 
@@ -106,4 +129,4 @@ npm run dev
 npm run build
 ```
 
-The implementation follows the current That Open `Worlds` + `FragmentsManager` + `IfcLoader` pattern rather than constructing a parallel BIM renderer.
+`npm run build` now builds both the operational viewer and the crowd benchmark entry. The implementation follows the current That Open `Worlds` + `FragmentsManager` + `IfcLoader` pattern rather than constructing a parallel BIM renderer.
