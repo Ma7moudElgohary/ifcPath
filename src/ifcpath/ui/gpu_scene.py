@@ -7,6 +7,7 @@ from typing import Iterable
 from ..model import InavModel, NavCell, Vec3
 from .preview_geometry import PreviewGeometry
 
+TriangleRecord = tuple[tuple[Vec3, Vec3, Vec3], str | None]
 
 _CATEGORY_COLORS: dict[str, tuple[float, float, float, float]] = {
     "wall": (0.45, 0.51, 0.58, 1.0),
@@ -25,7 +26,8 @@ class GpuMeshBatch:
 
     Vertex positions are stored relative to ``GpuSceneData.origin`` to preserve
     float32 precision for IFC/geospatial coordinates. Vertices are interleaved
-    as xyz + rgba (7 float32 values).
+    as xyz + rgba (7 float32 values). Triangle records are spatially ordered
+    before chunking so each batch has a useful local AABB for frustum culling.
     """
 
     key: str
@@ -89,7 +91,7 @@ def build_gpu_scene(
     show_navmesh: bool = True,
     max_triangles_per_batch: int = 24_000,
 ) -> GpuSceneData:
-    groups: dict[tuple[str | None, str], list[tuple[tuple[Vec3, Vec3, Vec3], str | None]]] = {}
+    groups: dict[tuple[str | None, str], list[TriangleRecord]] = {}
     source_points: list[Vec3] = []
 
     if show_bim and bim is not None:
@@ -121,8 +123,9 @@ def build_gpu_scene(
     batches: list[GpuMeshBatch] = []
     cap = max(1, int(max_triangles_per_batch))
     for (batch_level, category), triangles in sorted(groups.items(), key=lambda item: ((item[0][0] or ""), item[0][1])):
-        for chunk_index in range(0, len(triangles), cap):
-            chunk = triangles[chunk_index : chunk_index + cap]
+        ordered = _spatially_order(triangles)
+        for chunk_index in range(0, len(ordered), cap):
+            chunk = ordered[chunk_index : chunk_index + cap]
             batches.append(
                 _make_batch(
                     key=f"{batch_level or 'all'}:{category}:{chunk_index // cap}",
@@ -149,12 +152,54 @@ def visible_cells(model: InavModel | None, level_id: str | None) -> list[NavCell
     return [cell for cell in model.cells if cell.level_id == level_id]
 
 
+def _spatially_order(triangles: list[TriangleRecord]) -> list[TriangleRecord]:
+    """Deterministically Morton-order triangles by centroid.
+
+    Count chunking alone can produce batches whose AABBs span a whole building,
+    making frustum culling ineffective. Morton ordering preserves locality with
+    minimal preprocessing and no dependency on a renderer-specific spatial tree.
+    """
+
+    if len(triangles) <= 1:
+        return list(triangles)
+    centroids = [
+        tuple(sum(vertex[i] for vertex in tri) / 3.0 for i in range(3))
+        for tri, _guid in triangles
+    ]
+    mins = [min(point[i] for point in centroids) for i in range(3)]
+    maxs = [max(point[i] for point in centroids) for i in range(3)]
+
+    def quantize(value: float, axis: int) -> int:
+        span = maxs[axis] - mins[axis]
+        if span <= 1e-12:
+            return 0
+        return min(1023, max(0, int(round((value - mins[axis]) / span * 1023.0))))
+
+    decorated = []
+    for index, (record, centroid) in enumerate(zip(triangles, centroids)):
+        qx = quantize(centroid[0], 0)
+        qy = quantize(centroid[1], 1)
+        qz = quantize(centroid[2], 2)
+        decorated.append((_morton3(qx, qy, qz), index, record))
+    decorated.sort(key=lambda item: (item[0], item[1]))
+    return [record for _key, _index, record in decorated]
+
+
+def _morton3(x: int, y: int, z: int) -> int:
+    value = 0
+    for bit in range(10):
+        value |= ((x >> bit) & 1) << (3 * bit)
+        value |= ((y >> bit) & 1) << (3 * bit + 1)
+        value |= ((z >> bit) & 1) << (3 * bit + 2)
+    return value
+
+
 def _make_batch(
     *,
     key: str,
     category: str,
     level_id: str | None,
-    triangles: Iterable[tuple[tuple[Vec3, Vec3, Vec3], str | None]],
+    triangles: Iterable[TriangleRecord],
     origin: Vec3,
 ) -> GpuMeshBatch:
     color = _CATEGORY_COLORS.get(category, (0.50, 0.55, 0.61, 1.0))
