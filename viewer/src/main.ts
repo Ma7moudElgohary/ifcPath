@@ -3,6 +3,7 @@ import * as OBC from "@thatopen/components";
 import "./style.css";
 import { InavScene, SurfacePick, toThree, Vec3 } from "./inav-scene";
 import { CrowdLayer } from "./crowd";
+import { PlaybackFile, SimulationPlaybackLayer } from "./playback";
 
 const host = document.querySelector<HTMLDivElement>("#app")!;
 host.innerHTML = `
@@ -15,7 +16,7 @@ host.innerHTML = `
     <label>Agents <input id="agents" type="number" min="1" max="2000" value="100"/></label>
     <label>Speed <input id="speed" type="number" min="0.1" max="5" step="0.1" value="1"/></label>
     <label><input id="nav-visible" type="checkbox" checked/> Nav surface</label>
-    <button id="play">Pause crowd</button>
+    <button id="play">Pause route demo</button>
     <button id="fit">Fit navigation</button>
     <button id="clear">Clear route</button>
     <span id="status">Load IFC + INAV. Shift-click navigation surface for start and end.</span>
@@ -24,6 +25,13 @@ host.innerHTML = `
     <label>Blocked door IDs <input id="blocked" placeholder="door:GUID, door:GUID"/></label>
     <button id="apply-blocked">Apply + reroute</button>
     <span id="door-count"></span>
+  </div>
+  <div class="simulation-panel">
+    <label>Solver playback <input id="playback-file" type="file" accept=".json"/></label>
+    <button id="sim-play">Play simulation</button>
+    <input id="sim-time" type="range" min="0" max="0" value="0" step="0.01"/>
+    <label>x <input id="sim-speed" type="number" min="0.1" max="8" step="0.1" value="1"/></label>
+    <span id="sim-status">No playback loaded</span>
   </div>
   <div class="legend"><span class="open"></span>open <span class="stair"></span>stair <span class="ramp"></span>ramp</div>
 `;
@@ -34,6 +42,10 @@ const speedInput = document.querySelector<HTMLInputElement>("#speed")!;
 const blockedInput = document.querySelector<HTMLInputElement>("#blocked")!;
 const doorCount = document.querySelector<HTMLSpanElement>("#door-count")!;
 const playButton = document.querySelector<HTMLButtonElement>("#play")!;
+const simPlayButton = document.querySelector<HTMLButtonElement>("#sim-play")!;
+const simTime = document.querySelector<HTMLInputElement>("#sim-time")!;
+const simSpeed = document.querySelector<HTMLInputElement>("#sim-speed")!;
+const simStatus = document.querySelector<HTMLSpanElement>("#sim-status")!;
 
 const components = new OBC.Components();
 const worlds = components.get(OBC.Worlds);
@@ -70,13 +82,12 @@ fragments.list.onItemSet.add(({ value: model }) => {
 const ifcLoader = components.get(OBC.IfcLoader);
 await ifcLoader.setup({
   autoSetWasm: true,
-  // IFCPath INAV uses IFC world coordinates. Do not recenter either WebIFC or
-  // Fragments, otherwise BIM geometry and navigation geometry drift apart.
   webIfc: { COORDINATE_TO_ORIGIN: false },
 });
 
 const nav = new InavScene(world.scene.three);
 const crowd = new CrowdLayer(world.scene.three);
+const playback = new SimulationPlaybackLayer(world.scene.three);
 let start: SurfacePick | null = null;
 let goal: SurfacePick | null = null;
 let currentRoute: Vec3[] = [];
@@ -84,6 +95,8 @@ let paused = false;
 
 function rebuildCrowd() {
   if (currentRoute.length < 2) return;
+  playback.clear();
+  simStatus.textContent = "Route demo mode";
   const count = Math.max(1, Math.min(2000, Number(agentInput.value) || 100));
   crowd.spawnRouteAgents(currentRoute.map(toThree), count);
 }
@@ -132,7 +145,7 @@ function reroute() {
     return;
   }
   rebuildCrowd();
-  status.textContent = `Route ${nav.routeLength(currentRoute).toFixed(1)} m · ${currentRoute.length} waypoints · ${blockedIds().length} blocked door(s).`;
+  status.textContent = `Funnel route ${nav.routeLength(currentRoute).toFixed(1)} m · ${currentRoute.length} corners · ${blockedIds().length} blocked door(s).`;
 }
 
 document.querySelector<HTMLInputElement>("#ifc")!.onchange = async (event) => {
@@ -149,6 +162,7 @@ document.querySelector<HTMLInputElement>("#inav")!.onchange = async (event) => {
   if (!file) return;
   const model = JSON.parse(await file.text());
   nav.load(model);
+  playback.clear();
   clearRoute();
   const doors = nav.portalIds();
   doorCount.textContent = `${doors.length} door portal(s)`;
@@ -163,7 +177,25 @@ document.querySelector<HTMLInputElement>("#human")!.onchange = async (event) => 
   status.textContent = "Loading animated human GLB…";
   await crowd.loadHuman(file);
   rebuildCrowd();
-  status.textContent = "Human asset ready. Up to 64 animated GLB agents + instanced large crowd.";
+  status.textContent = "Human asset ready for route-demo agents.";
+};
+
+document.querySelector<HTMLInputElement>("#playback-file")!.onchange = async (event) => {
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text()) as PlaybackFile;
+    crowd.clear();
+    playback.load(data);
+    simTime.min = "0";
+    simTime.max = String(playback.durationS);
+    simTime.value = "0";
+    simPlayButton.textContent = "Play simulation";
+    simStatus.textContent = `${playback.backend} · ${playback.durationS.toFixed(1)} s`;
+    status.textContent = "Loaded microscopic solver playback.";
+  } catch (error) {
+    simStatus.textContent = error instanceof Error ? error.message : "Invalid playback file";
+  }
 };
 
 document.querySelector<HTMLButtonElement>("#clear")!.onclick = clearRoute;
@@ -177,7 +209,17 @@ speedInput.onchange = () => crowd.setSpeedMultiplier(Number(speedInput.value));
 playButton.onclick = () => {
   paused = !paused;
   crowd.setPaused(paused);
-  playButton.textContent = paused ? "Resume crowd" : "Pause crowd";
+  playButton.textContent = paused ? "Resume route demo" : "Pause route demo";
+};
+simTime.oninput = () => {
+  playback.seek(Number(simTime.value));
+  simStatus.textContent = `${playback.backend} · ${playback.currentTimeS.toFixed(1)} / ${playback.durationS.toFixed(1)} s`;
+};
+simSpeed.onchange = () => playback.setSpeed(Number(simSpeed.value));
+simPlayButton.onclick = () => {
+  const next = !playback.isPlaying;
+  playback.setPlaying(next);
+  simPlayButton.textContent = next ? "Pause simulation" : "Play simulation";
 };
 
 const canvas = world.renderer.three.domElement;
@@ -211,7 +253,14 @@ canvas.addEventListener("pointerup", (event) => {
 let last = performance.now();
 world.renderer.onBeforeUpdate.add(() => {
   const now = performance.now();
-  crowd.update(Math.min((now - last) / 1000, 0.05));
+  const dt = Math.min((now - last) / 1000, 0.05);
+  crowd.update(dt);
+  playback.update(dt);
+  if (playback.durationS > 0) {
+    simTime.value = String(playback.currentTimeS);
+    simPlayButton.textContent = playback.isPlaying ? "Pause simulation" : "Play simulation";
+    simStatus.textContent = `${playback.backend} · ${playback.currentTimeS.toFixed(1)} / ${playback.durationS.toFixed(1)} s`;
+  }
   last = now;
 });
 
