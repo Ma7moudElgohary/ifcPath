@@ -3,19 +3,46 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .egress_domains import classify_egress_domains
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, SemanticTransition, Space
+from .open_space_adjacency import connect_open_space_boundaries
+from .portal_recovery import qualify_surface_portal_sides
 from .semantic import ensure_semantic_transitions
 from .surface_portals import bind_semantic_surface_portals
 from .vertical_surface import ensure_surface_vertical_transitions
 
 
 def _ensure_portable_semantics(model: InavModel) -> None:
+    # Repair stale/ambiguous IFC door-side semantics against the authoritative
+    # floor surface before deriving any topology from those portals.
+    qualify_surface_portal_sides(model)
+
+    # Recover modelling-tolerance open-plan boundaries. The reference Duplex has
+    # 6 mm gaps between kitchen/living/foyer floor surfaces while actual wall
+    # separations start around 124 mm, so 20 mm remains deliberately far below a
+    # wall-width gap. Wider recovery requires loader-side wall qualification.
+    open_stats = connect_open_space_boundaries(
+        model,
+        [],
+        max_gap_m=0.02,
+        max_vertical_gap_m=0.02,
+    )
+    if open_stats.connected:
+        model.metadata["surface_open_boundary_count"] = sum(
+            portal.kind == "open_boundary" for portal in model.portals
+        )
+
     # Surface-derived stairs/ramps are authoritative for walkable vertical
     # circulation. Add those semantic transitions before the sampled-node
     # compatibility inference so the portable file preserves them explicitly.
     ensure_surface_vertical_transitions(model)
     ensure_semantic_transitions(model)
     bind_semantic_surface_portals(model)
+
+    # Egress readiness is an occupant-domain question, not a statement that
+    # service/roof geometry is unnavigable. Classify after all semantic access
+    # has been recovered so an authored roof terrace/penthouse remains required.
+    classify_egress_domains(model)
 
 
 def save_inav(model: InavModel, path: str | Path) -> Path:

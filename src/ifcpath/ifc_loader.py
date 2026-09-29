@@ -63,6 +63,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             level_id=level_id,
             centroid_m=centroid,
             ifc_guid=entity.GlobalId,
+            is_external=_space_is_external(entity),
         )
         out.spaces.append(space)
         space_boxes.append((space, bbox))
@@ -423,6 +424,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "elevator_connector_count": elevator_stats.connected,
         "elevator_landing_count": elevator_stats.landings,
         "elevator_rejected_count": elevator_stats.rejected,
+        "external_space_count": sum(space.is_external for space in out.spaces),
         "generator": "ifcpath",
     })
     return out
@@ -570,6 +572,15 @@ def _door_external_property(door) -> bool | None:
             if isinstance(value, bool):
                 return value
     return None
+
+
+def _space_is_external(entity) -> bool:
+    """Read standard IFC space interior/exterior classification across schema versions."""
+    boundary = str(getattr(entity, "InteriorOrExteriorSpace", "") or "").upper()
+    if boundary:
+        return boundary == "EXTERNAL"
+    predefined = str(getattr(entity, "PredefinedType", "") or "").upper()
+    return predefined == "EXTERNAL"
 
 
 def _space_at_point(point, space_boxes, tolerance_m: float = 0.15) -> str | None:
