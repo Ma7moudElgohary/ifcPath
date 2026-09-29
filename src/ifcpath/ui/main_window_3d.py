@@ -20,7 +20,7 @@ from ..ifc_loader import BuildOptions
 from ..model import InavModel, Vec3
 from ..validation import ValidationReport
 from .main_window import IFCPathBuilderWindow
-from .preview_3d import Projected3DPreview
+from .preview_factory import PreviewKind, create_preview
 from .preview_geometry import PreviewGeometry
 from .worker_3d import Builder3DWorker
 
@@ -34,6 +34,7 @@ class IFCPathBuilder3DWindow(IFCPathBuilderWindow):
         self._start_point: Vec3 | None = None
         self._goal_point: Vec3 | None = None
         self._route: HierarchicalRoute | None = None
+        self._renderer_logged = False
         self.setWindowTitle("IFCPath Builder")
 
     # ---------- extend the existing Builder shell ----------
@@ -97,12 +98,15 @@ class IFCPathBuilder3DWindow(IFCPathBuilderWindow):
         layout.insertWidget(insert_at, group)
         return scroll
 
+    def _preview_kind(self) -> PreviewKind:
+        return "base"
+
     def _build_workspace(self):
         workspace = super()._build_workspace()
         old_preview = self.preview
         splitter = old_preview.parentWidget()
         index = splitter.indexOf(old_preview)
-        preview = Projected3DPreview()
+        preview = create_preview(self._preview_kind())
         old_preview.setParent(None)
         old_preview.deleteLater()
         splitter.insertWidget(index, preview)
@@ -156,6 +160,7 @@ class IFCPathBuilder3DWindow(IFCPathBuilderWindow):
         if preview_geometry is not None:
             suffix = " (capped)" if preview_geometry.truncated else ""
             self._append_log(f"BIM preview: {len(preview_geometry.triangles)} triangles{suffix}")
+        self._log_renderer_once()
         self._refresh_preview()
 
     def _populate_model(self, model: InavModel, report: ValidationReport) -> None:
@@ -164,7 +169,18 @@ class IFCPathBuilder3DWindow(IFCPathBuilderWindow):
         self.pick_goal_button.setEnabled(bool(model.cells))
         if self.level_combo.count() > 0:
             self.level_combo.setCurrentIndex(0)
+        self._log_renderer_once()
         self._refresh_preview()
+
+    def _log_renderer_once(self) -> None:
+        if self._renderer_logged:
+            return
+        self._renderer_logged = True
+        renderer_name = getattr(self.preview, "renderer_name", "Qt projected renderer")
+        self._append_log(f"VIEWPORT: {renderer_name}")
+        fallback = getattr(self.preview, "gpu_fallback_reason", None)
+        if fallback:
+            self._append_log(f"VIEWPORT: WebGPU request fell back to Qt: {fallback}")
 
     def open_ifc(self) -> None:
         super().open_ifc()
@@ -188,8 +204,9 @@ class IFCPathBuilder3DWindow(IFCPathBuilderWindow):
         if self._model is None:
             return
         super()._refresh_preview()
-        if isinstance(self.preview, Projected3DPreview):
+        if hasattr(self.preview, "set_bim_visible"):
             self.preview.set_bim_visible(self.bim_check.isChecked())
+        if hasattr(self.preview, "set_view_mode"):
             self.preview.set_view_mode(self.view_combo.currentData() or "3d")
 
     def _begin_pick(self, mode: str) -> None:
@@ -253,8 +270,9 @@ class IFCPathBuilder3DWindow(IFCPathBuilderWindow):
         self.route_label.setText("Route: —")
         self.route_button.setEnabled(False)
         self.clear_route_button.setEnabled(False)
-        if isinstance(self.preview, Projected3DPreview):
+        if hasattr(self.preview, "set_pick_mode"):
             self.preview.set_pick_mode(None)
+        if hasattr(self.preview, "set_route"):
             self.preview.set_route(None, None, [])
 
     def _point_label(self, point: Vec3, space_id, level_id) -> str:

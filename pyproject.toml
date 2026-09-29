@@ -9,16 +9,31 @@ description = "IFC to portable indoor-navigation graph generator for digital twi
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "ifcopenshell>=0.8.0",
+  # Geometry output is part of IFCPath's deterministic qualification contract.
+  # 0.9.0 changed tessellation/geometry behavior enough to fragment the
+  # buildingSMART Duplex reference graph. Upgrade only in a dedicated,
+  # re-qualified compatibility change.
+  "ifcopenshell==0.8.5",
   "shapely>=2.1",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 desktop = ["PySide6>=6.8,<7"]
+gpu = [
+  "wgpu==0.31.1; python_version >= '3.11'",
+  "rendercanvas>=2.7,<3; python_version >= '3.11'",
+]
+desktop-gpu = [
+  "PySide6>=6.8,<7",
+  "wgpu==0.31.1; python_version >= '3.11'",
+  "rendercanvas>=2.7,<3; python_version >= '3.11'",
+]
 microscopic = ["jupedsim==1.4.2"]
 desktop-build = [
   "PySide6>=6.8,<7",
+  "wgpu==0.31.1; python_version >= '3.11'",
+  "rendercanvas>=2.7,<3; python_version >= '3.11'",
   "pyinstaller>=6.11",
 ]
 
