@@ -4,6 +4,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 from .model import InavModel, NavCell
+from .portal_recovery import portal_surface_distances
 from .vertical_surface import find_surface_vertical_transfer
 
 
@@ -160,10 +161,15 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
         observed = semantic_crossings.get(portal.id, set())
         if not any(set(pair) == expected for pair in observed):
             surface_portal_side_failures += 1
+            nearest = portal_surface_distances(model, portal.id)[:4]
+            evidence = ", ".join(f"{space_id}={distance:.3f}m" for distance, space_id in nearest)
+            message = "Semantic portal is not backed by a surface crossing between both spaces"
+            if evidence:
+                message += f"; nearest surfaced spaces: {evidence}"
             issues.append(SurfaceReadinessIssue(
                 "warning",
                 "SURFACE_PORTAL_MISSING_SIDE",
-                "Semantic portal is not backed by a surface crossing between both spaces",
+                message,
                 portal.id,
             ))
 
