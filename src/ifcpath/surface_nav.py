@@ -88,49 +88,54 @@ def find_cell_corridor(cells, start_cell_id, goal_cell_id):
 
 
 def stitch_surface_seams(cells, max_gap_m=0.20, max_vertical_gap_m=0.30):
-    """Join separately tessellated walkable elements at genuine boundary seams.
-
-    IFC spaces, slabs and stair flights are tessellated independently, so exact
-    shared vertices are not guaranteed. We only bridge boundary edges whose
-    midpoints are close in 3D and whose vertical separation is pedestrian-scale.
-    """
-    by_id = {cell.id: cell for cell in cells}
-    connected = {tuple(sorted((cell.id, n))) for cell in cells for n in cell.neighbor_ids}
-    boundaries = []
-    edge_counts = defaultdict(int)
-    edge_data = {}
-    scale = 1e5
+    """Join independently tessellated floor/landing/circulation boundary edges."""
+    by_id={c.id:c for c in cells}; connected={tuple(sorted((c.id,n))) for c in cells for n in c.neighbor_ids}
+    counts=defaultdict(int); data={}; scale=1e5
     def key(a,b):
         qa=tuple(round(v*scale) for v in a); qb=tuple(round(v*scale) for v in b)
         return (qa,qb) if qa <= qb else (qb,qa)
     for cell in cells:
         v=cell.vertices_m
         for a,b in ((v[0],v[1]),(v[1],v[2]),(v[2],v[0])):
-            k=key(a,b); edge_counts[k]+=1; edge_data.setdefault(k,(cell.id,a,b))
-    for k,count in edge_counts.items():
-        if count == 1:
-            cid,a,b=edge_data[k]
-            mid=((a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2)
-            boundaries.append((cid,mid))
+            k=key(a,b); counts[k]+=1; data.setdefault(k,(cell.id,a,b))
+    boundaries=[data[k] for k,n in counts.items() if n==1]
     added=0
-    for i,(aid,am) in enumerate(boundaries):
-        for bid,bm in boundaries[i+1:]:
-            if aid == bid or tuple(sorted((aid,bid))) in connected:
-                continue
-            if by_id[aid].terrain == by_id[bid].terrain == "open" and by_id[aid].space_id != by_id[bid].space_id:
-                continue
-            if abs(am[2]-bm[2]) > max_vertical_gap_m or math.dist(am,bm) > max_gap_m:
-                continue
-            by_id[aid].neighbor_ids.append(bid); by_id[bid].neighbor_ids.append(aid)
-            # A stitched seam is represented by a conservative short portal
-            # centred between the two independently tessellated boundaries.
-            center=((am[0]+bm[0])/2,(am[1]+bm[1])/2,(am[2]+bm[2])/2)
-            half=min(max_gap_m*0.25,0.05)
-            portal=((center[0]-half,center[1],center[2]),(center[0]+half,center[1],center[2]))
-            by_id[aid].portals[bid]=portal; by_id[bid].portals[aid]=portal
+    for i,(aid,a0,a1) in enumerate(boundaries):
+        for bid,b0,b1 in boundaries[i+1:]:
+            if aid==bid or tuple(sorted((aid,bid))) in connected: continue
+            ca,cb=by_id[aid],by_id[bid]
+            if ca.terrain==cb.terrain=="open" and ca.space_id != cb.space_id: continue
+            pa,pb=_closest_segment_points(a0,a1,b0,b1)
+            if abs(pa[2]-pb[2]) > max_vertical_gap_m or math.dist(pa,pb) > max_gap_m: continue
+            center=tuple((pa[k]+pb[k])/2 for k in range(3))
+            # Preserve a real crossing segment when possible; otherwise a tiny
+            # local portal still records where independently meshed surfaces meet.
+            direction=(a1[0]-a0[0],a1[1]-a0[1],a1[2]-a0[2]); length=math.sqrt(sum(v*v for v in direction))
+            if length > 1e-9:
+                u=tuple(v/length for v in direction); half=min(0.25*length,0.10)
+                portal=(tuple(center[k]-u[k]*half for k in range(3)),tuple(center[k]+u[k]*half for k in range(3)))
+            else: portal=(center,center)
+            ca.neighbor_ids.append(bid); cb.neighbor_ids.append(aid); ca.portals[bid]=portal; cb.portals[aid]=portal
             connected.add(tuple(sorted((aid,bid)))); added+=1
     return added
 
+
+def _closest_segment_points(p1,q1,p2,q2):
+    """Closest points on two 3D segments (Real-Time Collision Detection)."""
+    d1=tuple(q1[i]-p1[i] for i in range(3)); d2=tuple(q2[i]-p2[i] for i in range(3)); r=tuple(p1[i]-p2[i] for i in range(3))
+    a=sum(v*v for v in d1); e=sum(v*v for v in d2); f=sum(d2[i]*r[i] for i in range(3)); eps=1e-12
+    if a<=eps and e<=eps: return p1,p2
+    if a<=eps: ss=0.0; tt=max(0.0,min(1.0,f/e))
+    else:
+        c=sum(d1[i]*r[i] for i in range(3))
+        if e<=eps: tt=0.0; ss=max(0.0,min(1.0,-c/a))
+        else:
+            b=sum(d1[i]*d2[i] for i in range(3)); denom=a*e-b*b
+            ss=0.0 if abs(denom)<=eps else max(0.0,min(1.0,(b*f-c*e)/denom))
+            tt=(b*ss+f)/e
+            if tt<0.0: tt=0.0; ss=max(0.0,min(1.0,-c/a))
+            elif tt>1.0: tt=1.0; ss=max(0.0,min(1.0,(b-c)/a))
+    return tuple(p1[i]+d1[i]*ss for i in range(3)),tuple(p2[i]+d2[i]*tt for i in range(3))
 
 def surface_components(cells):
     by_id={c.id:c for c in cells}; remaining=set(by_id); result=[]
