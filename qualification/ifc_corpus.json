@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Pinned public IFC qualification corpus. Sources are immutable and license-reviewed; large Git LFS cases use media.githubusercontent.com plus the LFS SHA-256 object id.",
+  "description": "Pinned public IFC qualification corpus. Large Git LFS cases are fetched from immutable source commits and verified by the LFS SHA-256 object id.",
   "defaults": {
     "timeout_seconds": 180,
     "build_options": {
@@ -30,17 +30,8 @@
       "expected_outcome": "PASS-NAV",
       "tiers": [1, 2, 3],
       "tags": ["real-building", "residential", "multistorey", "spaces", "doors", "stairs", "revit", "ifc2x3"],
-      "build_options": {
-        "floor_spacing_m": 1.0,
-        "stair_spacing_m": 0.25,
-        "connect_distance_m": 1.5
-      },
-      "expect": {
-        "min_levels": 2,
-        "min_spaces": 5,
-        "navigation_ready": true,
-        "require_multilevel_route": true
-      }
+      "build_options": {"floor_spacing_m": 1.0, "stair_spacing_m": 0.25, "connect_distance_m": 1.5},
+      "expect": {"min_levels": 2, "min_spaces": 5, "navigation_ready": true, "require_multilevel_route": true}
     },
     {
       "id": "bsc-cert-simple-ifc2x3",
@@ -57,10 +48,10 @@
         "redistributable": true
       },
       "schema": "IFC2X3",
-      "authoring_source": "SketchUp 2026 / Sketchup IFC Manager",
+      "authoring_source": "buildingSMART Certification dataset",
       "expected_outcome": "PASS-PARTIAL",
       "tiers": [1, 2, 3],
-      "tags": ["small", "architecture", "spaces", "rotated-placement", "millimetres", "ifc2x3"]
+      "tags": ["small", "architecture", "spaces", "ifc2x3"]
     },
     {
       "id": "bsc-cert-simple-ifc4",
@@ -68,8 +59,8 @@
       "source": {
         "repository": "buildingSMART/Certification-datasets",
         "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
-        "path": "IFC 4.0.2.1 (IFC 4)/Simple-Scene/Building-Architecture.ifc",
-        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Simple-Scene/Building-Architecture.ifc",
+        "path": "IFC 4.0.2.1 (IFC 4 ADD2 TC1)/Simple-Scene/Building-Architecture.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204%20ADD2%20TC1)/Simple-Scene/Building-Architecture.ifc",
         "git_blob_sha1": "ad4090b7fbdf7ab640e6bc66d3c66c086e9dc9dd",
         "size_bytes": 142325,
         "license": "CC-BY-4.0",
@@ -108,8 +99,8 @@
       "source": {
         "repository": "buildingSMART/Certification-datasets",
         "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
-        "path": "IFC 4.0.2.1 (IFC 4)/Reference View/wall-with-opening-and-window.ifc",
-        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Reference%20View/wall-with-opening-and-window.ifc",
+        "path": "IFC 4.0.2.1 (IFC 4 ADD2 TC1)/ISO Spec - ReferenceView_V1.2/wall-with-opening-and-window.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204%20ADD2%20TC1)/ISO%20Spec%20-%20ReferenceView_V1.2/wall-with-opening-and-window.ifc",
         "git_blob_sha1": "8820193e625f693712be860d79291a0ee48eacd7",
         "size_bytes": 12492,
         "license": "CC-BY-4.0",
@@ -128,8 +119,8 @@
       "source": {
         "repository": "buildingSMART/Certification-datasets",
         "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
-        "path": "IFC 4.0.2.1 (IFC 4)/Reference View/basin-tessellation.ifc",
-        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Reference%20View/basin-tessellation.ifc",
+        "path": "IFC 4.0.2.1 (IFC 4 ADD2 TC1)/ISO Spec - ReferenceView_V1.2/basin-tessellation.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204%20ADD2%20TC1)/ISO%20Spec%20-%20ReferenceView_V1.2/basin-tessellation.ifc",
         "git_blob_sha1": "6598b39f682850f1af7a80df0fec32d3137fad89",
         "size_bytes": 12131,
         "license": "CC-BY-4.0",
@@ -168,8 +159,8 @@
       "source": {
         "repository": "buildingSMART/Certification-datasets",
         "commit": "80d976a9b193a26a8e928c3e79bff67af1de68a8",
-        "path": "IFC 4.0.2.1 (IFC 4)/Simple-Scene/Building-Structural.ifc",
-        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204)/Simple-Scene/Building-Structural.ifc",
+        "path": "IFC 4.0.2.1 (IFC 4 ADD2 TC1)/Simple-Scene/Building-Structural.ifc",
+        "url": "https://raw.githubusercontent.com/buildingSMART/Certification-datasets/80d976a9b193a26a8e928c3e79bff67af1de68a8/IFC%204.0.2.1%20(IFC%204%20ADD2%20TC1)/Simple-Scene/Building-Structural.ifc",
         "git_blob_sha1": "0a0fc46360cd713fb92cf424f134356dc868a103",
         "size_bytes": 185185,
         "license": "CC-BY-4.0",
