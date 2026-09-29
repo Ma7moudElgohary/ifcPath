@@ -5,6 +5,7 @@ import sys
 from PySide6.QtCore import QElapsedTimer, QTimer
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
@@ -16,6 +17,8 @@ from PySide6.QtWidgets import (
 
 from ..evacuation import EvacuationConfig, EvacuationSimulator, spawn_agents
 from ..hierarchical_routing import HierarchicalRouteOptions
+from ..hybrid_evacuation import HybridEvacuationConfig, HybridEvacuationSimulator
+from ..microscopic_motion import MicroscopicBackendUnavailable
 from ..model import InavModel
 from ..validation import ValidationReport
 from .evacuation_preview import Evacuation3DPreview
@@ -24,10 +27,10 @@ from .scenario_window import IFCPathScenarioWindow
 
 
 class IFCPathEvacuationWindow(IFCPathScenarioWindow):
-    """Desktop Builder with deterministic multi-person evacuation simulation."""
+    """Desktop Builder with selectable mesoscopic / hybrid evacuation simulation."""
 
     def __init__(self) -> None:
-        self._evacuation_simulator: EvacuationSimulator | None = None
+        self._evacuation_simulator: EvacuationSimulator | HybridEvacuationSimulator | None = None
         self._evacuation_running = False
         super().__init__()
 
@@ -44,6 +47,23 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
 
         group = QGroupBox("Multi-person evacuation")
         group_layout = QVBoxLayout(group)
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Movement model"))
+        self.evacuation_model_combo = QComboBox()
+        self.evacuation_model_combo.addItem("Mesoscopic (fast)", "mesoscopic")
+        self.evacuation_model_combo.addItem("Hybrid deterministic", "hybrid_kinematic")
+        self.evacuation_model_combo.addItem("Hybrid microscopic (JuPedSim)", "hybrid_jupedsim")
+        self.evacuation_model_combo.setToolTip(
+            "Mesoscopic is the fast queue/capacity model. Hybrid deterministic exercises "
+            "the exact multi-floor handoff architecture without crowd interaction. Hybrid "
+            "microscopic uses optional JuPedSim for collision-aware floor movement."
+        )
+        self.evacuation_model_combo.currentIndexChanged.connect(
+            lambda _index: self._evacuation_mode_changed()
+        )
+        model_row.addWidget(self.evacuation_model_combo, 1)
+        group_layout.addLayout(model_row)
 
         population_row = QHBoxLayout()
         population_row.addWidget(QLabel("Occupants"))
@@ -155,6 +175,11 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
         self._sync_evacuation_preview()
         self._update_evacuation_controls()
 
+    def _evacuation_mode_changed(self) -> None:
+        if self._evacuation_simulator is not None:
+            self._reset_evacuation()
+            self.statusBar().showMessage("Evacuation model changed; prepare the population again", 5000)
+
     def _evacuation_options(self) -> HierarchicalRouteOptions:
         return HierarchicalRouteOptions(
             blocked_portals=set(self._blocked_portals),
@@ -168,6 +193,42 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
             door_specific_flow_pps_per_m=flow,
             exit_specific_flow_pps_per_m=flow,
             stair_capacity_pps=float(self.evacuation_stair_capacity_spin.value()),
+        )
+
+    def _evacuation_mode(self) -> str:
+        if not hasattr(self, "evacuation_model_combo"):
+            return "mesoscopic"
+        return str(self.evacuation_model_combo.currentData() or "mesoscopic")
+
+    def _evacuation_mode_name(self) -> str:
+        names = {
+            "mesoscopic": "mesoscopic",
+            "hybrid_kinematic": "hybrid deterministic",
+            "hybrid_jupedsim": "hybrid microscopic / JuPedSim",
+        }
+        return names.get(self._evacuation_mode(), self._evacuation_mode())
+
+    def _create_evacuation_simulator(
+        self,
+        agents,
+        config: EvacuationConfig,
+    ) -> EvacuationSimulator | HybridEvacuationSimulator:
+        assert self._model is not None
+        mode = self._evacuation_mode()
+        if mode == "mesoscopic":
+            return EvacuationSimulator(
+                self._model,
+                agents,
+                options=self._evacuation_options(),
+                config=config,
+            )
+        backend = "jupedsim" if mode == "hybrid_jupedsim" else "kinematic"
+        return HybridEvacuationSimulator(
+            self._model,
+            agents,
+            options=self._evacuation_options(),
+            config=config,
+            hybrid_config=HybridEvacuationConfig(local_backend=backend),
         )
 
     def _prepare_evacuation(self) -> None:
@@ -191,21 +252,34 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
             seed=int(self.evacuation_seed_spin.value()),
             config=config,
         )
-        self._evacuation_simulator = EvacuationSimulator(
-            self._model,
-            agents,
-            options=self._evacuation_options(),
-            config=config,
-        )
+        try:
+            self._evacuation_simulator = self._create_evacuation_simulator(agents, config)
+        except MicroscopicBackendUnavailable as exc:
+            self._evacuation_simulator = None
+            message = (
+                "JuPedSim microscopic mode is optional and is not installed in this build. "
+                "Install IFCPath with the 'microscopic' extra, or choose another movement model."
+            )
+            self.evacuation_summary_label.setText(f"Evacuation: {message}")
+            self.evacuation_exit_label.setText("Exits: —")
+            self._append_log(f"EVACUATION: {message} ({exc})")
+            self.statusBar().showMessage(message, 10000)
+            self._update_evacuation_controls()
+            return
+
         self._evacuation_running = False
         self._sync_evacuation_preview()
         self._update_evacuation_controls()
         stats = self._evacuation_simulator.stats
+        mode_name = self._evacuation_mode_name()
         self._append_log(
-            f"EVACUATION: prepared {stats.total_agents} occupant(s), "
+            f"EVACUATION: prepared {stats.total_agents} occupant(s) using {mode_name}, "
             f"{stats.trapped_agents} initially trapped"
         )
-        self.statusBar().showMessage("Multi-person evacuation prepared", 5000)
+        self.statusBar().showMessage(
+            f"Multi-person evacuation prepared ({mode_name})",
+            5000,
+        )
 
     def _toggle_evacuation(self) -> None:
         if self._evacuation_simulator is None:
@@ -220,7 +294,7 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
             self._evacuation_running = True
             self._evacuation_clock.start()
             self._evacuation_timer.start()
-            self._append_log("EVACUATION: started")
+            self._append_log(f"EVACUATION: started ({self._evacuation_mode_name()})")
         self._update_evacuation_controls()
 
     def _stop_evacuation_timer(self) -> None:
@@ -258,7 +332,7 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
             self._append_log(
                 f"EVACUATION: complete at {stats.elapsed_s:.2f}s · "
                 f"evacuated={stats.evacuated_agents} trapped={stats.trapped_agents} "
-                f"max_queue={stats.max_queue}"
+                f"max_queue={stats.max_queue} · model={self._evacuation_mode_name()}"
             )
             self.statusBar().showMessage("Evacuation simulation complete", 7000)
 
@@ -285,7 +359,9 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
         )
         self.evacuation_reset_button.setEnabled(simulator is not None)
         if simulator is None:
-            self.evacuation_summary_label.setText("Evacuation: not prepared")
+            # Keep a more specific optional-backend message if prepare just set one.
+            if not self.evacuation_summary_label.text().startswith("Evacuation: JuPedSim"):
+                self.evacuation_summary_label.setText("Evacuation: not prepared")
             self.evacuation_exit_label.setText("Exits: —")
             return
 
@@ -293,8 +369,9 @@ class IFCPathEvacuationWindow(IFCPathScenarioWindow):
         average = "—" if stats.average_evacuation_time_s is None else f"{stats.average_evacuation_time_s:.1f}s"
         clearance = "—" if stats.clearance_time_s is None else f"{stats.clearance_time_s:.1f}s"
         self.evacuation_summary_label.setText(
-            f"t={stats.elapsed_s:.1f}s · evacuated {stats.evacuated_agents}/{stats.total_agents} · "
-            f"moving {stats.active_agents - stats.waiting_agents} · waiting {stats.waiting_agents} · "
+            f"{self._evacuation_mode_name()} · t={stats.elapsed_s:.1f}s · "
+            f"evacuated {stats.evacuated_agents}/{stats.total_agents} · "
+            f"active {stats.active_agents - stats.waiting_agents} · waiting {stats.waiting_agents} · "
             f"trapped {stats.trapped_agents} · max queue {stats.max_queue} · "
             f"avg {average} · clearance {clearance}"
         )

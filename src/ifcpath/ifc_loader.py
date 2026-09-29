@@ -7,6 +7,7 @@ import ifcopenshell
 import ifcopenshell.geom
 
 from .cdt import build_space_cdt_navmesh
+from .elevator_ifc import add_ifc_elevator_connectors
 from .geometry import build_radius_edges, sample_space_floor_triangles, sample_walkable_triangles
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, Space
 from .obstacles import (
@@ -28,6 +29,8 @@ class BuildOptions:
     agent_clearance_m: float = 0.0
     agent_height_m: float = 1.8
     fixed_obstacle_classes: tuple[str, ...] = ("IfcColumn",)
+    elevator_door_search_distance_m: float = 1.0
+    elevator_landing_connect_distance_m: float = 2.5
 
 
 def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> InavModel:
@@ -361,6 +364,14 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
                         portal_id=portal_id,
                     ))
 
+    elevator_stats = add_ifc_elevator_connectors(
+        model,
+        out,
+        bbox_provider=_bbox,
+        door_search_distance_m=options.elevator_door_search_distance_m,
+        landing_connect_distance_m=options.elevator_landing_connect_distance_m,
+    )
+
     out.metadata.update({
         "node_count": len(out.nodes),
         "edge_count": len(out.edges),
@@ -382,6 +393,10 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         "wall_obstacle_count": len(wall_obstacles),
         "blocked_walk_edges": blocked_walk_edges,
         "semantic_cross_space_edges_removed": semantic_cross_space_edges,
+        "elevator_transport_count": elevator_stats.detected,
+        "elevator_connector_count": elevator_stats.connected,
+        "elevator_landing_count": elevator_stats.landings,
+        "elevator_rejected_count": elevator_stats.rejected,
         "generator": "ifcpath",
     })
     return out

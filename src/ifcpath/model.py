@@ -46,6 +46,10 @@ class SemanticTransition:
     to_level_id: str | None = None
     bidirectional: bool = True
     source: str = "ifc"
+    # Multiple adjacent-level transitions can belong to one physical resource.
+    # For example one three-storey elevator shaft must map to one shared car
+    # dispatcher rather than one independent car per floor-to-floor edge.
+    resource_id: str | None = None
 
 
 @dataclass(slots=True)

@@ -55,11 +55,17 @@ class LocalMotionBackend(Protocol):
     IFCPath remains responsible for BIM semantics, hierarchical routing, exits,
     hazards and route selection. A backend receives local targets and is only
     responsible for physically plausible pedestrian motion towards those targets.
+
+    ``snapshot().target_m`` is the backend's *effective* target. Backends may
+    project a requested route waypoint to the nearest physically valid agent-centre
+    position; route progression must use the effective target for completion.
     """
 
     name: str
 
     def add_agent(self, spec: MicroscopicAgentSpec) -> None: ...
+
+    def remove_agent(self, agent_id: str) -> None: ...
 
     def set_target(self, agent_id: str, target_m: Vec3) -> None: ...
 
@@ -79,12 +85,7 @@ class _KinematicState:
 
 
 class KinematicLocalMotionBackend:
-    """Deterministic no-interaction fallback implementing the backend contract.
-
-    This deliberately does *not* claim to be crowd physics. It exists so hosts,
-    tests and packaged builds can use the same local-motion interface when the
-    optional JuPedSim dependency is not installed.
-    """
+    """Deterministic no-interaction fallback implementing the backend contract."""
 
     name = "kinematic"
 
@@ -95,6 +96,11 @@ class KinematicLocalMotionBackend:
         if spec.id in self._agents:
             raise ValueError(f"duplicate microscopic agent id: {spec.id}")
         self._agents[spec.id] = _KinematicState(spec, spec.position_m, spec.target_m)
+
+    def remove_agent(self, agent_id: str) -> None:
+        if agent_id not in self._agents:
+            raise KeyError(agent_id)
+        del self._agents[agent_id]
 
     def set_target(self, agent_id: str, target_m: Vec3) -> None:
         state = self._agents[agent_id]
@@ -137,16 +143,15 @@ class KinematicLocalMotionBackend:
 
 
 class JuPedSimLocalMotionBackend:
-    """JuPedSim operational-model adapter for one IFC navigation level.
+    """JuPedSim adapter for one connected IFCPath horizontal motion domain.
 
-    The adapter intentionally uses a JuPedSim direct-steering stage. IFCPath owns
-    route choice and continuously supplies local targets; JuPedSim owns collision
-    avoidance and pedestrian interaction inside the continuous walkable floor
-    geometry reconstructed from IFCPath CDT cells.
+    The adapter uses a JuPedSim direct-steering stage. IFCPath owns route choice;
+    JuPedSim owns collision avoidance and pedestrian interaction inside the supplied
+    walkable domain.
 
-    One backend instance represents one horizontal navigation level. Vertical
-    transitions (stairs/ramps/elevators) remain IFCPath semantic transitions and
-    can hand an agent between level backends in a higher-level hybrid controller.
+    ``space_id`` is optional for standalone/legacy level-local use. Hybrid mode
+    supplies it because JuPedSim requires one connected accessible area and rooms
+    separated by walls can be disconnected even when they share the same storey.
     """
 
     name = "jupedsim"
@@ -156,15 +161,28 @@ class JuPedSimLocalMotionBackend:
         model: InavModel,
         level_id: str,
         *,
+        space_id: str | None = None,
         config: MicroscopicMotionConfig | None = None,
     ) -> None:
         self.model = model
         self.level_id = level_id
+        self.space_id = space_id
         self.config = config or MicroscopicMotionConfig()
         if self.config.dt_s <= 0.0:
             raise ValueError("microscopic dt_s must be > 0")
 
-        self.walkable_geometry = build_level_walkable_geometry(model, level_id)
+        self.walkable_geometry = build_level_walkable_geometry(
+            model,
+            level_id,
+            space_id=space_id,
+        )
+        if _geometry_component_count(self.walkable_geometry) > 1:
+            domain = f"space {space_id!r}" if space_id else f"level {level_id!r}"
+            raise ValueError(
+                f"JuPedSim accessible area for {domain} is disconnected; "
+                "use a connected semantic motion domain"
+            )
+
         self._jps = _load_jupedsim()
         operational_model = _create_jupedsim_model(self._jps, self.config.model)
         self._simulation = self._jps.Simulation(
@@ -203,7 +221,7 @@ class JuPedSimLocalMotionBackend:
         target_xy = _project_xy_inside(
             self.walkable_geometry,
             spec.target_m[:2],
-            self.config.target_inset_m,
+            max(radius + 1e-4, self.config.target_inset_m),
         )
         params_type = _agent_parameters_type(self._jps, self.config.model)
         params = params_type(
@@ -217,19 +235,37 @@ class JuPedSimLocalMotionBackend:
         native_id = int(self._simulation.add_agent(params))
         self._simulation.agent(native_id).target = target_xy
         self._agent_ids[spec.id] = native_id
-        self._targets[spec.id] = _vec3(spec.target_m)
+        self._targets[spec.id] = (
+            float(target_xy[0]),
+            float(target_xy[1]),
+            float(spec.target_m[2]),
+        )
         self._z_by_agent[spec.id] = float(spec.position_m[2])
+
+    def remove_agent(self, agent_id: str) -> None:
+        native_id = self._agent_ids[agent_id]
+        marked = bool(self._simulation.mark_agent_for_removal(native_id))
+        if not marked:
+            raise RuntimeError(f"JuPedSim could not mark agent {agent_id!r} for removal")
+        self._agent_ids.pop(agent_id, None)
+        self._targets.pop(agent_id, None)
+        self._z_by_agent.pop(agent_id, None)
 
     def set_target(self, agent_id: str, target_m: Vec3) -> None:
         native_id = self._agent_ids[agent_id]
         target = _vec3(target_m)
+        radius = _native_agent_radius(self._simulation.agent(native_id), self.config.default_radius_m)
         target_xy = _project_xy_inside(
             self.walkable_geometry,
             target[:2],
-            self.config.target_inset_m,
+            max(radius + 1e-4, self.config.target_inset_m),
         )
         self._simulation.agent(native_id).target = target_xy
-        self._targets[agent_id] = target
+        self._targets[agent_id] = (
+            float(target_xy[0]),
+            float(target_xy[1]),
+            float(target[2]),
+        )
 
     def advance(self, delta_seconds: float) -> None:
         self._accumulator_s += max(0.0, float(delta_seconds))
@@ -260,24 +296,33 @@ class JuPedSimLocalMotionBackend:
         return [self.snapshot(agent_id) for agent_id in sorted(self._agent_ids)]
 
 
-def build_level_walkable_geometry(model: InavModel, level_id: str) -> BaseGeometry:
-    """Union IFCPath CDT triangles into JuPedSim-compatible 2D floor geometry."""
+def build_level_walkable_geometry(
+    model: InavModel,
+    level_id: str,
+    *,
+    space_id: str | None = None,
+) -> BaseGeometry:
+    """Union IFCPath CDT triangles into a continuous 2D motion domain."""
     triangles: list[Polygon] = []
     for cell in model.cells:
         if cell.level_id != level_id:
+            continue
+        if space_id is not None and cell.space_id != space_id:
             continue
         coordinates = [(float(vertex[0]), float(vertex[1])) for vertex in cell.vertices_m]
         polygon = Polygon(coordinates)
         if not polygon.is_empty and polygon.area > _EPSILON:
             triangles.append(polygon)
     if not triangles:
-        raise ValueError(f"level {level_id!r} has no walkable navigation cells")
+        domain = f"space {space_id!r} on level {level_id!r}" if space_id else f"level {level_id!r}"
+        raise ValueError(f"{domain} has no walkable navigation cells")
 
     geometry = unary_union(triangles)
     if not geometry.is_valid:
         geometry = geometry.buffer(0)
     if geometry.is_empty or geometry.area <= _EPSILON:
-        raise ValueError(f"level {level_id!r} produced empty walkable geometry")
+        domain = f"space {space_id!r} on level {level_id!r}" if space_id else f"level {level_id!r}"
+        raise ValueError(f"{domain} produced empty walkable geometry")
     return geometry
 
 
@@ -286,6 +331,7 @@ def create_local_motion_backend(
     *,
     model: InavModel | None = None,
     level_id: str | None = None,
+    space_id: str | None = None,
     config: MicroscopicMotionConfig | None = None,
 ) -> LocalMotionBackend:
     """Create a local-motion backend without leaking solver imports to callers."""
@@ -295,7 +341,12 @@ def create_local_motion_backend(
     if normalized in {"jupedsim", "jps", "microscopic"}:
         if model is None or not level_id:
             raise ValueError("JuPedSim backend requires model and level_id")
-        return JuPedSimLocalMotionBackend(model, level_id, config=config)
+        return JuPedSimLocalMotionBackend(
+            model,
+            level_id,
+            space_id=space_id,
+            config=config,
+        )
     raise ValueError(f"unknown local-motion backend: {name}")
 
 
@@ -335,6 +386,22 @@ def _load_jupedsim():
             "JuPedSim backend is optional; install IFCPath with the 'microscopic' extra"
         ) from exc
     return jps
+
+
+def _geometry_component_count(geometry: BaseGeometry) -> int:
+    geoms = getattr(geometry, "geoms", None)
+    if geoms is None:
+        return 1
+    return sum(1 for part in geoms if not part.is_empty and part.area > _EPSILON)
+
+
+def _native_agent_radius(agent, fallback: float) -> float:
+    model = getattr(agent, "model", None)
+    radius = getattr(model, "radius", None) if model is not None else None
+    try:
+        return max(0.01, float(radius)) if radius is not None else max(0.01, float(fallback))
+    except (TypeError, ValueError):
+        return max(0.01, float(fallback))
 
 
 def _project_xy_inside(

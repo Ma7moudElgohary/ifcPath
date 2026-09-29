@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 from shapely.geometry import Polygon
 
 from ifcpath.cdt import build_floor_cdt_navmesh
+from ifcpath.hybrid_evacuation import HybridEvacuationSimulator
 from ifcpath.model import InavModel, Level, NavCell, Portal, Space
 from ifcpath.ui.evacuation_preview import Evacuation3DPreview
 from ifcpath.ui.evacuation_window import IFCPathEvacuationWindow
@@ -62,6 +63,16 @@ def _window() -> tuple[QApplication, IFCPathEvacuationWindow]:
     return app, window
 
 
+def test_desktop_defaults_to_fast_mesoscopic_model() -> None:
+    app, window = _window()
+
+    assert window.evacuation_model_combo.currentData() == "mesoscopic"
+    assert window.evacuation_model_combo.count() == 3
+
+    window.close()
+    app.processEvents()
+
+
 def test_desktop_prepares_population_and_renders_agents() -> None:
     app, window = _window()
     window.evacuation_count_spin.setValue(6)
@@ -102,6 +113,52 @@ def test_desktop_evacuation_advances_and_reports_completion_metrics() -> None:
     assert simulator.stats.clearance_time_s is not None
     assert "evacuated 4/4" in window.evacuation_summary_label.text()
     assert "Exits:" in window.evacuation_exit_label.text()
+
+    window.close()
+    app.processEvents()
+
+
+def test_desktop_can_run_dependency_free_hybrid_handoff_mode() -> None:
+    app, window = _window()
+    index = window.evacuation_model_combo.findData("hybrid_kinematic")
+    assert index >= 0
+    window.evacuation_model_combo.setCurrentIndex(index)
+    window.evacuation_count_spin.setValue(4)
+    window.evacuation_min_speed_spin.setValue(2.0)
+    window.evacuation_max_speed_spin.setValue(2.0)
+    window.evacuation_flow_spin.setValue(5.0)
+    window._prepare_evacuation()
+
+    simulator = window._evacuation_simulator
+    assert isinstance(simulator, HybridEvacuationSimulator)
+    assert "hybrid deterministic" in window.evacuation_summary_label.text()
+
+    for _ in range(250):
+        if simulator.finished:
+            break
+        window._advance_evacuation(0.1)
+
+    assert simulator.finished
+    assert simulator.stats.evacuated_agents == 4
+    assert simulator.stats.trapped_agents == 0
+
+    window.close()
+    app.processEvents()
+
+
+def test_desktop_optional_jupedsim_mode_fails_cleanly_when_solver_is_absent() -> None:
+    app, window = _window()
+    index = window.evacuation_model_combo.findData("hybrid_jupedsim")
+    assert index >= 0
+    window.evacuation_model_combo.setCurrentIndex(index)
+    window.evacuation_count_spin.setValue(2)
+    window._prepare_evacuation()
+
+    # desktop-smoke intentionally installs [desktop,test], not [microscopic].
+    # The production UI must explain the optional dependency rather than crash.
+    assert window._evacuation_simulator is None
+    assert "JuPedSim microscopic mode is optional" in window.evacuation_summary_label.text()
+    assert not window.evacuation_start_button.isEnabled()
 
     window.close()
     app.processEvents()

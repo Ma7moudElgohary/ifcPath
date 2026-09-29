@@ -35,9 +35,10 @@ class MicroscopicRouteController:
     routes. All agents in the backend are advanced together, preserving the
     interaction semantics of microscopic solvers such as JuPedSim.
 
-    This controller is intentionally level-local. A higher-level evacuation
-    coordinator can hand an agent to a different controller after IFCPath has
-    processed a stair/ramp/elevator semantic transition.
+    A backend is allowed to project an IFCPath waypoint to its nearest physically
+    valid agent-centre target (for example, inward from a wall/door boundary by an
+    agent radius). Waypoint completion therefore compares against the backend's
+    effective target, not blindly against the unprojected route vertex.
     """
 
     def __init__(
@@ -69,8 +70,6 @@ class MicroscopicRouteController:
         points = _dedupe_route(position_m, route_points)
         target_index = _first_target_index(position_m, points, self.config.waypoint_tolerance_m)
         if target_index >= len(points):
-            # The common backend contract requires a target even for an already
-            # complete route, so keep the agent stationary at its start.
             target = _vec3(position_m)
             state = _RouteState(points=points or [target], target_index=len(points), finished=True)
         else:
@@ -88,6 +87,13 @@ class MicroscopicRouteController:
             )
         )
         self._routes[agent_id] = state
+
+    def remove_agent(self, agent_id: str) -> None:
+        """Remove an agent so a higher-level coordinator can hand it elsewhere."""
+        if agent_id not in self._routes:
+            raise KeyError(agent_id)
+        self.backend.remove_agent(agent_id)
+        del self._routes[agent_id]
 
     def replace_remaining_route(
         self,
@@ -136,14 +142,19 @@ class MicroscopicRouteController:
             state = self._routes[agent_id]
             if state.finished:
                 continue
+
             snapshot = self.backend.snapshot(agent_id)
             while state.target_index < len(state.points):
-                target = state.points[state.target_index]
-                if math.dist(snapshot.position_m, target) > tolerance:
+                # The backend may project a route vertex inward from an obstacle or
+                # domain boundary. Its snapshot exposes that effective target.
+                if math.dist(snapshot.position_m, snapshot.target_m) > tolerance:
                     break
+
                 state.target_index += 1
                 if state.target_index < len(state.points):
                     self.backend.set_target(agent_id, state.points[state.target_index])
+                    snapshot = self.backend.snapshot(agent_id)
+
             if state.target_index >= len(state.points):
                 state.finished = True
                 self.backend.set_target(agent_id, snapshot.position_m)
