@@ -31,9 +31,9 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
     space graph layered over qualified surface spaces, while doors/stairs/ramps
     still have to be backed by valid NavCell topology.
 
-    IFC spaces explicitly marked exterior remain valid geometry/topology but are
-    not occupant egress domains. Their lack of an indoor exit route therefore
-    does not make an otherwise qualified building unroutable.
+    Exterior or explicitly service-only spaces remain valid navigation geometry
+    but are not occupant-egress domains. Their lack of an indoor evacuation exit
+    therefore does not make an otherwise qualified building unroutable.
     """
     if not model.cells:
         return SurfaceReadiness(
@@ -118,7 +118,15 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
         for space_id in surface_spaces
         if space_by_id.get(space_id) is not None and space_by_id[space_id].is_external
     }
-    required_surface_spaces = surface_spaces - external_surface_spaces
+    service_surface_spaces = {
+        space_id
+        for space_id in surface_spaces
+        if space_by_id.get(space_id) is not None
+        and not space_by_id[space_id].is_external
+        and not space_by_id[space_id].egress_required
+    }
+    egress_exempt_surface_spaces = external_surface_spaces | service_surface_spaces
+    required_surface_spaces = surface_spaces - egress_exempt_surface_spaces
     surface_levels = {cell.level_id for cell in open_cells if cell.level_id}
     required_surface_levels = {
         cell.level_id
@@ -230,7 +238,7 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
         issues.append(SurfaceReadinessIssue(
             "warning",
             "SURFACE_SPACES_CANNOT_REACH_EXIT",
-            f"{len(unreachable_required_spaces)} internal surfaced space(s) cannot reach a classified exit",
+            f"{len(unreachable_required_spaces)} occupant-egress surfaced space(s) cannot reach a classified exit",
         ))
 
     multi_level_surface = len(required_surface_levels) > 1
@@ -239,7 +247,7 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
         issues.append(SurfaceReadinessIssue(
             "warning",
             "SURFACE_NO_CROSS_LEVEL_TRANSITION",
-            "Multiple internal surfaced levels exist but no semantic cross-level transition connects them",
+            "Multiple occupant-egress surfaced levels exist but no semantic cross-level transition connects them",
         ))
 
     if required_surface_spaces:
@@ -283,6 +291,8 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
             "surface_space_count": len(surface_spaces),
             "surface_internal_space_count": len(required_surface_spaces),
             "surface_external_space_count": len(external_surface_spaces),
+            "surface_service_space_count": len(service_surface_spaces),
+            "surface_egress_exempt_space_count": len(egress_exempt_surface_spaces),
             "surface_level_count": len(surface_levels),
             "surface_internal_level_count": len(required_surface_levels),
             "surface_semantic_component_count": semantic_component_count,
