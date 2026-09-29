@@ -173,7 +173,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             )
             points.extend(sampled)
             point_kinds.extend(["walk"] * len(sampled))
-            point_levels.extend([level_by_entity.get(entity.id())] * len(sampled))
+            vertical_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
+            point_levels.extend([vertical_level_id] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
             point_cell_ids.extend([None] * len(sampled))
 
@@ -449,17 +450,44 @@ def _contained_levels(model, levels: list[Level]):
 
 
 def _spatial_level_id(entity, level_by_entity: dict[int, str | None], level_by_guid: dict[str, str]) -> str | None:
-    direct = level_by_entity.get(entity.id())
-    if direct:
-        return direct
-    for rel in getattr(entity, "Decomposes", ()) or ():
-        parent = getattr(rel, "RelatingObject", None)
-        if parent is not None and parent.is_a("IfcBuildingStorey"):
-            return level_by_guid.get(parent.GlobalId)
-    for rel in getattr(entity, "ContainedInStructure", ()) or ():
-        parent = getattr(rel, "RelatingStructure", None)
-        if parent is not None and parent.is_a("IfcBuildingStorey"):
-            return level_by_guid.get(parent.GlobalId)
+    """Resolve storey through containment and decomposition ancestry."""
+    queue = [entity]
+    visited: set[int] = set()
+    while queue:
+        current = queue.pop(0)
+        try:
+            current_id = current.id()
+        except Exception:
+            current_id = id(current)
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+
+        direct = level_by_entity.get(current_id)
+        if direct:
+            return direct
+
+        for rel in getattr(current, "ContainedInStructure", ()) or ():
+            parent = getattr(rel, "RelatingStructure", None)
+            if parent is None:
+                continue
+            try:
+                if parent.is_a("IfcBuildingStorey"):
+                    return level_by_guid.get(parent.GlobalId)
+            except Exception:
+                pass
+            queue.append(parent)
+
+        for rel in getattr(current, "Decomposes", ()) or ():
+            parent = getattr(rel, "RelatingObject", None)
+            if parent is None:
+                continue
+            try:
+                if parent.is_a("IfcBuildingStorey"):
+                    return level_by_guid.get(parent.GlobalId)
+            except Exception:
+                pass
+            queue.append(parent)
     return None
 
 
