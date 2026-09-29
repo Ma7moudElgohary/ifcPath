@@ -5,6 +5,7 @@ from array import array
 import wgpu
 
 from ..model import InavModel, Vec3
+from .gpu_culling import aabb_visible_in_clip, world_bounds_to_local
 from .gpu_overlay import build_navigation_overlay, build_scenario_overlay
 from .gpu_preview import GpuBimPreview
 from .person_mesh import build_person_mesh
@@ -14,11 +15,11 @@ from .preview_geometry import PreviewGeometry
 class GpuScenarioPreview(GpuBimPreview):
     """WebGPU preview for the real scenario/evacuation Builder shell.
 
-    BIM/navmesh batches remain resident. Route, portal/graph/endpoint markers,
-    hazards, blocked portals, the walking agent and evacuation occupants use
-    separate grow-on-demand dynamic buffers. Once capacity is sufficient, a
-    simulation tick only writes new bytes; it does not allocate GPU resources or
-    rebuild static IFC geometry.
+    BIM/navmesh batches remain resident and are frustum-culled per frame. Route,
+    portal/graph/endpoint markers, hazards, blocked portals, the walking agent
+    and evacuation occupants use separate grow-on-demand dynamic buffers. Once
+    capacity is sufficient, a simulation tick only writes new bytes; it does not
+    allocate GPU resources or rebuild static IFC geometry.
     """
 
     def __init__(self, parent=None) -> None:
@@ -38,6 +39,8 @@ class GpuScenarioPreview(GpuBimPreview):
         self._overlay_line_capacity = 0
         self._overlay_line_count = 0
         self._person_triangle_count = 0
+        self._last_visible_static_batches = 0
+        self._last_total_static_batches = 0
         self._refresh_overlay_buffers()
 
     # ---------- preserve the preview contract while refreshing only overlays ----------
@@ -133,6 +136,14 @@ class GpuScenarioPreview(GpuBimPreview):
     def overlay_line_count(self) -> int:
         return self._overlay_line_count // 2
 
+    @property
+    def visible_static_batch_count(self) -> int:
+        return self._last_visible_static_batches
+
+    @property
+    def total_static_batch_count(self) -> int:
+        return self._last_total_static_batches
+
     # ---------- dynamic buffers ----------
 
     def _refresh_overlay_buffers(self) -> None:
@@ -219,7 +230,8 @@ class GpuScenarioPreview(GpuBimPreview):
         width, height = self.get_physical_size()
         width, height = max(1, int(width)), max(1, int(height))
         aspect = width / max(1.0, float(height))
-        matrix = array("f", self._camera.view_projection(aspect))
+        matrix_tuple = self._camera.view_projection(aspect)
+        matrix = array("f", matrix_tuple)
         self._device.queue.write_buffer(self._camera_buffer, 0, matrix)
 
         encoder = self._device.create_command_encoder()
@@ -243,7 +255,16 @@ class GpuScenarioPreview(GpuBimPreview):
         render_pass.set_bind_group(0, self._bind_group)
 
         render_pass.set_pipeline(self._triangle_pipeline)
-        for vertex_buffer, index_buffer, count, _category in self._gpu_batches:
+        scene = self._scene_data
+        self._last_total_static_batches = len(self._gpu_batches)
+        self._last_visible_static_batches = 0
+        for index, (vertex_buffer, index_buffer, count, _category) in enumerate(self._gpu_batches):
+            if scene is not None and index < len(scene.batches):
+                batch = scene.batches[index]
+                local_min, local_max = world_bounds_to_local(batch.bounds_min, batch.bounds_max, scene.origin)
+                if not aabb_visible_in_clip(matrix_tuple, local_min, local_max):
+                    continue
+            self._last_visible_static_batches += 1
             render_pass.set_vertex_buffer(0, vertex_buffer)
             render_pass.set_index_buffer(index_buffer, "uint32")
             render_pass.draw_indexed(count, 1, 0, 0, 0)
