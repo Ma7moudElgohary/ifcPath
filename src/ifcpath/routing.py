@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .model import InavModel
 from .surface_nav import find_surface_route
+from .surface_portals import bind_semantic_surface_portals
 
 
 @dataclass(slots=True)
@@ -18,14 +19,7 @@ class RouteOptions:
 
 
 def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptions | None = None) -> list[str]:
-    """Find a dynamic route through an INAV model.
-
-    ``blocked_spaces`` are treated as no-entry regions. If the route starts
-    inside one of them, movement inside that start space is still allowed so an
-    occupant can evacuate out. ``space_cost_multipliers`` are penalties >= 1.0
-    suitable for smoke, crowd density, security preference, or other Digital
-    Twin state that should discourage rather than completely disable a space.
-    """
+    """Find a dynamic route through an INAV model."""
     options = options or RouteOptions()
     blocked_portals = options.blocked_portals or set()
     blocked_nodes = options.blocked_nodes or set()
@@ -49,12 +43,10 @@ def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptio
             continue
         if edge.a in blocked_nodes or edge.b in blocked_nodes:
             continue
-
         a_node = nodes.get(edge.a)
         b_node = nodes.get(edge.b)
         if a_node is None or b_node is None:
             continue
-
         if (
             a_node.space_id in blocked_spaces
             and a_node.space_id != start_space_id
@@ -63,7 +55,6 @@ def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptio
             and b_node.space_id != start_space_id
         ):
             continue
-
         node_penalty = max(0.0, hazard_costs.get(edge.a, 0.0), hazard_costs.get(edge.b, 0.0))
         space_multiplier = max(
             1.0,
@@ -77,7 +68,6 @@ def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptio
     queue: list[tuple[float, str]] = [(0.0, start_id)]
     dist = {start_id: 0.0}
     prev: dict[str, str] = {}
-
     while queue:
         current_dist, current = heapq.heappop(queue)
         if current == goal_id:
@@ -100,10 +90,24 @@ def find_path(model: InavModel, start_id: str, goal_id: str, options: RouteOptio
     return path
 
 
+def find_path_xyz(
+    model: InavModel,
+    start_xyz,
+    goal_xyz,
+    *,
+    terrain_costs=None,
+    blocked_portals: set[str] | None = None,
+):
+    """Route arbitrary XYZ points over the authoritative continuous surface.
 
-def find_path_xyz(model: InavModel, start_xyz, goal_xyz, *, terrain_costs=None):
-    """Preferred continuous-surface route API for new consumers.
-
-    The legacy node-ID router remains available during migration.
+    Semantic doors are bound lazily and idempotently. ``blocked_portals``
+    disables those exact door crossings without rebuilding navigation geometry.
     """
-    return find_surface_route(model.cells, start_xyz, goal_xyz, terrain_costs)
+    bind_semantic_surface_portals(model)
+    return find_surface_route(
+        model.cells,
+        start_xyz,
+        goal_xyz,
+        terrain_costs,
+        blocked_portal_ids=blocked_portals,
+    )
