@@ -46,9 +46,6 @@ class SemanticTransition:
     to_level_id: str | None = None
     bidirectional: bool = True
     source: str = "ifc"
-    # Multiple adjacent-level transitions can belong to one physical resource.
-    # For example one three-storey elevator shaft must map to one shared car
-    # dispatcher rather than one independent car per floor-to-floor edge.
     resource_id: str | None = None
 
 
@@ -57,8 +54,9 @@ class NavCell:
     """Portable triangular navigation-mesh cell.
 
     Cells preserve the constrained triangulation rather than only its centroid
-    graph. Consumers can therefore recover a triangle corridor and run a funnel
-    / string-pulling pass for a geometrically short route.
+    graph. ``portals`` stores the geometric crossing segment for each adjacent
+    cell. ``portal_ids`` binds an adjacency to an IFC semantic portal (normally
+    a door), allowing dynamic closure/blocking without modifying the mesh.
     """
 
     id: str
@@ -68,6 +66,7 @@ class NavCell:
     neighbor_ids: list[str] = field(default_factory=list)
     terrain: str = "open"
     portals: dict[str, tuple[Vec3, Vec3]] = field(default_factory=dict)
+    portal_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
