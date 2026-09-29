@@ -259,6 +259,27 @@ def validate_model(model: InavModel) -> ValidationReport:
                 f"{exit_unreachable_nodes} navigation nodes cannot reach any classified exit",
             ))
 
+    vertical_node_counts = {
+        kind: sum(node.kind == kind for node in model.nodes)
+        for kind in ("stair", "ramp", "elevator")
+    }
+    vertical_transitions = [
+        transition
+        for transition in model.transitions
+        if transition.kind in {"stair", "ramp", "elevator", "vertical"}
+    ]
+    vertical_levels = {
+        node.level_id
+        for node in model.nodes
+        if node.kind in {"stair", "ramp", "elevator"} and node.level_id
+    }
+    if len(model.levels) > 1 and sum(vertical_node_counts.values()) > 0 and not vertical_transitions:
+        issues.append(ValidationIssue(
+            "warning",
+            "VERTICAL_NO_TRANSITION",
+            "Vertical circulation geometry exists but produced no inter-level semantic transition",
+        ))
+
     error_count = sum(issue.severity == "error" for issue in issues)
     warning_count = sum(issue.severity == "warning" for issue in issues)
     return ValidationReport(
@@ -284,6 +305,11 @@ def validate_model(model: InavModel) -> ValidationReport:
             "exit_reachable_ratio": exit_reachable_ratio,
             "errors": error_count,
             "warnings": warning_count,
+            "stair_nodes": vertical_node_counts["stair"],
+            "ramp_nodes": vertical_node_counts["ramp"],
+            "elevator_nodes": vertical_node_counts["elevator"],
+            "vertical_levels": len(vertical_levels),
+            "vertical_transitions": len(vertical_transitions),
         },
     )
 
