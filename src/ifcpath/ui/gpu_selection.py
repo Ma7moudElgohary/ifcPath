@@ -41,13 +41,7 @@ class _BvhNode:
 
 
 class BimSelectionIndex:
-    """Small CPU BVH for click selection of IFC preview products.
-
-    Rendering stays on WebGPU. Selection uses the authoritative IFC preview
-    triangles and a bounding-volume hierarchy so a click does not scan every BIM
-    triangle in a large model. The same GlobalId identity used by the render
-    batches is returned to the UI/property inspector.
-    """
+    """CPU BVH for scalable click selection of IFC preview products."""
 
     def __init__(
         self,
@@ -86,6 +80,15 @@ class BimSelectionIndex:
         if not guid:
             return []
         return list(self._triangles_by_guid.get(guid, ()))
+
+    def bounds_for_guid(self, guid: str | None) -> tuple[Vec3, Vec3] | None:
+        triangles = self.triangles_for_guid(guid)
+        if not triangles:
+            return None
+        points = [point for triangle in triangles for point in triangle.vertices_m]
+        bounds_min: Vec3 = tuple(min(point[axis] for point in points) for axis in range(3))  # type: ignore[assignment]
+        bounds_max: Vec3 = tuple(max(point[axis] for point in points) for axis in range(3))  # type: ignore[assignment]
+        return bounds_min, bounds_max
 
     def pick(self, origin_m: Vec3, direction: Vec3) -> ElementSelectionHit | None:
         if self._root is None:
