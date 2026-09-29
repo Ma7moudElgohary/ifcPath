@@ -46,6 +46,21 @@ jobs:
       - run: pip install -e ".[desktop,test]"
       - run: pytest -q tests/test_desktop_builder.py tests/test_desktop_simulation.py tests/test_desktop_evacuation.py tests/test_desktop_profiles.py
 
+  gpu-tests:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 mesa-vulkan-drivers
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[desktop-gpu,test]"
+      - run: pytest -q tests/test_gpu_camera.py tests/test_gpu_scene.py tests/test_gpu_backend.py
+
   desktop-package-windows:
     runs-on: windows-latest
     steps:
