@@ -235,10 +235,22 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
             "Classified exits are not attached to any surfaced navigation space",
         ))
     elif unreachable_required_spaces:
+        unreachable_sorted = sorted(unreachable_required_spaces)
+        for space_id in unreachable_sorted[:25]:
+            space = space_by_id.get(space_id)
+            name = space.name if space and space.name else space_id
+            issues.append(SurfaceReadinessIssue(
+                "warning",
+                "SURFACE_SPACE_CANNOT_REACH_EXIT",
+                f"Occupant-egress surfaced space cannot reach a classified exit: {name}",
+                space_id,
+            ))
+        remaining = max(0, len(unreachable_sorted) - 25)
+        suffix = f"; {remaining} additional space(s) omitted from per-space diagnostics" if remaining else ""
         issues.append(SurfaceReadinessIssue(
             "warning",
             "SURFACE_SPACES_CANNOT_REACH_EXIT",
-            f"{len(unreachable_required_spaces)} occupant-egress surfaced space(s) cannot reach a classified exit",
+            f"{len(unreachable_required_spaces)} occupant-egress surfaced space(s) cannot reach a classified exit{suffix}",
         ))
 
     multi_level_surface = len(required_surface_levels) > 1
