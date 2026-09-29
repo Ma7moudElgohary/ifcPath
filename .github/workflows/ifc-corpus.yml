@@ -1,0 +1,111 @@
+name: IFC corpus qualification
+
+on:
+  pull_request:
+    paths:
+      - "src/ifcpath/**"
+      - "scripts/qualify_ifc_case.py"
+      - "scripts/qualify_ifc_corpus.py"
+      - "qualification/**"
+      - "tests/test_corpus_qualification.py"
+      - "pyproject.toml"
+      - ".github/workflows/ifc-corpus.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/ifcpath/**"
+      - "scripts/qualify_ifc_case.py"
+      - "scripts/qualify_ifc_corpus.py"
+      - "qualification/**"
+      - "tests/test_corpus_qualification.py"
+      - "pyproject.toml"
+      - ".github/workflows/ifc-corpus.yml"
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Qualification tier (1=PR, 2=full/nightly, 3=release representative)"
+        required: true
+        default: "2"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ifc-corpus-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  qualify:
+    name: Tiered real IFC corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install IFCPath
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Unit regression tests
+        run: python -m pytest tests/test_corpus_qualification.py -q
+
+      - name: Select corpus tier
+        id: tier
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "value=${{ inputs.tier }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "value=2" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore IFC corpus cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/ifc-corpus
+          key: ifc-corpus-v1-${{ runner.os }}-${{ hashFiles('qualification/ifc_corpus.json') }}
+          restore-keys: |
+            ifc-corpus-v1-${{ runner.os }}-
+
+      - name: Qualify public IFC corpus
+        run: |
+          python scripts/qualify_ifc_corpus.py \
+            --tier "${{ steps.tier.outputs.value }}" \
+            --output-dir artifacts/ifc-corpus
+
+      - name: Publish qualification summary
+        if: always()
+        shell: bash
+        run: |
+          REPORT="artifacts/ifc-corpus/tier-${{ steps.tier.outputs.value }}-failure-matrix.md"
+          if [[ -f "$REPORT" ]]; then
+            cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload corpus qualification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ifc-corpus-tier-${{ steps.tier.outputs.value }}-${{ github.sha }}
+          path: artifacts/ifc-corpus
+          if-no-files-found: warn
+          retention-days: 30
