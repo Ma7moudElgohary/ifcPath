@@ -16,14 +16,15 @@ def _ensure_portable_semantics(model: InavModel) -> None:
     # floor surface before deriving any topology from those portals.
     qualify_surface_portal_sides(model)
 
-    # Recover only exact/coincident open-plan space boundaries. Wider geometric
-    # gaps require loader-side wall qualification and are deliberately not
-    # inferred here from portable data alone.
+    # Recover modelling-tolerance open-plan boundaries. The reference Duplex has
+    # 6 mm gaps between kitchen/living/foyer floor surfaces while actual wall
+    # separations start around 124 mm, so 20 mm remains deliberately far below a
+    # wall-width gap. Wider recovery requires loader-side wall qualification.
     open_stats = connect_open_space_boundaries(
         model,
         [],
-        max_gap_m=1e-4,
-        max_vertical_gap_m=1e-4,
+        max_gap_m=0.02,
+        max_vertical_gap_m=0.02,
     )
     if open_stats.connected:
         model.metadata["surface_open_boundary_count"] = sum(
