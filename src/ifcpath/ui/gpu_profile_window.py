@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
-from PySide6.QtCore import QThread
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QThread, Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QDockWidget,
+    QLabel,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..ifc_loader import BuildOptions
+from .gpu_selection import ElementSelectionHit
 from .preview_factory import create_preview
 from .profile_window import IFCPathProfileWindow
 from .worker_3d import Builder3DWorker
@@ -13,6 +23,18 @@ from .worker_3d import Builder3DWorker
 
 class IFCPathGpuProfileWindow(IFCPathProfileWindow):
     """Final Builder shell with the opt-in WebGPU preview installed last."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._build_element_inspector()
+        if hasattr(self.preview, "elementSelected"):
+            self.preview.elementSelected.connect(self._show_element_selection)
+            self.preview.selectionCleared.connect(self._clear_element_selection)
+            self.element_inspector_dock.setEnabled(True)
+            self.element_hint_label.setText("Click a BIM element to inspect its IFC data.")
+        else:
+            self.element_inspector_dock.setEnabled(False)
+            self.element_hint_label.setText("IFC element picking is available in WebGPU mode.")
 
     def _build_workspace(self):
         workspace = super()._build_workspace()
@@ -26,6 +48,101 @@ class IFCPathGpuProfileWindow(IFCPathProfileWindow):
         self.preview = preview
         self.preview.pointPicked.connect(self._point_picked)
         return workspace
+
+    def _build_element_inspector(self) -> None:
+        dock = QDockWidget("IFC Element", self)
+        dock.setObjectName("ifcElementInspector")
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setMinimumWidth(290)
+
+        content = QWidget(dock)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.element_hint_label = QLabel("No BIM element selected")
+        self.element_hint_label.setWordWrap(True)
+        layout.addWidget(self.element_hint_label)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(2)
+        tree.setHeaderLabels(["Property", "Value"])
+        tree.setAlternatingRowColors(True)
+        tree.setUniformRowHeights(True)
+        tree.setRootIsDecorated(True)
+        tree.setColumnWidth(0, 150)
+        layout.addWidget(tree, 1)
+        self.element_property_tree = tree
+
+        dock.setWidget(content)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.element_inspector_dock = dock
+
+    def _show_element_selection(self, hit: ElementSelectionHit) -> None:
+        element = hit.element
+        self.element_property_tree.clear()
+        if element is None:
+            self.element_hint_label.setText(f"Selected {hit.guid}")
+            self._add_property(self.element_property_tree.invisibleRootItem(), "GlobalId", hit.guid)
+            self._add_property(self.element_property_tree.invisibleRootItem(), "Category", hit.category)
+            return
+
+        title = element.name or element.ifc_class
+        self.element_hint_label.setText(f"{title}\n{element.ifc_class} · {element.guid}")
+        root = self.element_property_tree.invisibleRootItem()
+
+        identity = QTreeWidgetItem(["Identity", ""])
+        root.addChild(identity)
+        self._add_property(identity, "GlobalId", element.guid)
+        self._add_property(identity, "Express ID", element.express_id)
+        self._add_property(identity, "IFC Class", element.ifc_class)
+        self._add_property(identity, "Category", element.category)
+        self._add_property(identity, "Level", element.level_id or "—")
+        self._add_property(identity, "Name", element.name or "—")
+        self._add_property(identity, "Description", element.description or "—")
+        self._add_property(identity, "Object Type", element.object_type or "—")
+        self._add_property(identity, "Predefined Type", element.predefined_type or "—")
+        self._add_property(identity, "Tag", element.tag or "—")
+        self._add_property(identity, "Hit XYZ", f"{hit.point_m[0]:.3f}, {hit.point_m[1]:.3f}, {hit.point_m[2]:.3f} m")
+        identity.setExpanded(True)
+
+        if element.attributes:
+            attributes = QTreeWidgetItem(["IFC Attributes", ""])
+            root.addChild(attributes)
+            for name in sorted(element.attributes):
+                self._add_value(attributes, name, element.attributes[name])
+
+        for pset_name in sorted(element.property_sets):
+            pset = QTreeWidgetItem([pset_name, ""])
+            root.addChild(pset)
+            for name in sorted(element.property_sets[pset_name]):
+                self._add_value(pset, name, element.property_sets[pset_name][name])
+
+        self.statusBar().showMessage(
+            f"Selected {element.ifc_class} · {element.name or element.guid}",
+            4000,
+        )
+
+    def _clear_element_selection(self) -> None:
+        self.element_property_tree.clear()
+        self.element_hint_label.setText("Click a BIM element to inspect its IFC data.")
+
+    def _add_value(self, parent: QTreeWidgetItem, name: str, value: Any, *, depth: int = 0) -> None:
+        if isinstance(value, dict) and depth < 3:
+            item = QTreeWidgetItem([str(name), ""])
+            parent.addChild(item)
+            for key in sorted(value):
+                self._add_value(item, str(key), value[key], depth=depth + 1)
+            return
+        if isinstance(value, list) and depth < 3:
+            item = QTreeWidgetItem([str(name), f"{len(value)} item(s)"])
+            parent.addChild(item)
+            for index, child in enumerate(value[:64]):
+                self._add_value(item, f"[{index}]", child, depth=depth + 1)
+            return
+        self._add_property(parent, name, value)
+
+    @staticmethod
+    def _add_property(parent: QTreeWidgetItem, name: str, value: Any) -> None:
+        parent.addChild(QTreeWidgetItem([str(name), "" if value is None else str(value)]))
 
     def _start_worker(
         self,
