@@ -1,4 +1,5 @@
-import { copyFile, mkdir } from "node:fs/promises";
+import { access, copyFile, mkdir } from "node:fs/promises";
+import { constants } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -8,8 +9,26 @@ const destinationRoot = path.join(viewerRoot, "public", "wasm");
 
 await mkdir(destinationRoot, { recursive: true });
 
-for (const name of ["web-ifc.wasm", "web-ifc-mt.wasm", "web-ifc-mt.worker.js"]) {
-  await copyFile(path.join(sourceRoot, name), path.join(destinationRoot, name));
+async function copyRequired(name) {
+  const source = path.join(sourceRoot, name);
+  await access(source, constants.R_OK);
+  await copyFile(source, path.join(destinationRoot, name));
 }
 
-console.log(`Bundled WebIFC WASM assets from ${sourceRoot} -> ${destinationRoot}`);
+async function copyOptional(name) {
+  const source = path.join(sourceRoot, name);
+  try {
+    await access(source, constants.R_OK);
+  } catch {
+    return false;
+  }
+  await copyFile(source, path.join(destinationRoot, name));
+  return true;
+}
+
+await copyRequired("web-ifc.wasm");
+for (const name of ["web-ifc-mt.wasm", "web-ifc-mt.worker.js", "web-ifc-mt.worker.mjs"]) {
+  await copyOptional(name);
+}
+
+console.log(`Bundled WebIFC runtime assets from ${sourceRoot} -> ${destinationRoot}`);
