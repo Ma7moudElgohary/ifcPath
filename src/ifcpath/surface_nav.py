@@ -37,6 +37,12 @@ def connect_cells_by_shared_edges(cells, tolerance_m=1e-5):
         a,b=indices
         cells[a].neighbor_ids.append(cells[b].id)
         cells[b].neighbor_ids.append(cells[a].id)
+        shared_key = next((k for k, inds in owners.items() if inds == indices), None)
+        if shared_key is not None:
+            pa = tuple(v / scale for v in shared_key[0])
+            pb = tuple(v / scale for v in shared_key[1])
+            cells[a].portals[cells[b].id] = (pa, pb)
+            cells[b].portals[cells[a].id] = (pa, pb)
 
 
 def cell_centroid(cell):
@@ -108,6 +114,12 @@ def stitch_surface_seams(cells, max_gap_m=0.20, max_vertical_gap_m=0.30):
             if abs(am[2]-bm[2]) > max_vertical_gap_m or math.dist(am,bm) > max_gap_m:
                 continue
             by_id[aid].neighbor_ids.append(bid); by_id[bid].neighbor_ids.append(aid)
+            # A stitched seam is represented by a conservative short portal
+            # centred between the two independently tessellated boundaries.
+            center=((am[0]+bm[0])/2,(am[1]+bm[1])/2,(am[2]+bm[2])/2)
+            half=min(max_gap_m*0.25,0.05)
+            portal=((center[0]-half,center[1],center[2]),(center[0]+half,center[1],center[2]))
+            by_id[aid].portals[bid]=portal; by_id[bid].portals[aid]=portal
             connected.add(tuple(sorted((aid,bid)))); added+=1
     return added
 
@@ -183,6 +195,9 @@ def _weighted_cell_corridor(cells, start_id, goal_id, terrain_costs):
 
 def _cell_portal(a,b,tol=1e-4):
     """Midpoint of a shared/stitched boundary; stable fallback for 3D corridors."""
+    if b.id in a.portals:
+        p,q=a.portals[b.id]
+        return ((p[0]+q[0])/2,(p[1]+q[1])/2,(p[2]+q[2])/2)
     pairs=[]
     for pa in a.vertices_m:
         for pb in b.vertices_m:
