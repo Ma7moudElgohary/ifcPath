@@ -1,9 +1,11 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import "./style.css";
+import { StudyAnalyticsPanel } from "./analytics";
 import { InavModel, InavScene, SurfacePick, toThree, Vec3 } from "./inav-scene";
 import { CrowdLayer } from "./crowd";
 import { PlaybackFile, SimulationPlaybackLayer } from "./playback";
+import { ScenarioEditorLayer, ScenarioEditMode } from "./scenario-editor";
 import { checkStudyServer, runLiveStudy, StudyScenarioLayer } from "./study-client";
 
 const host = document.querySelector<HTMLDivElement>("#app")!;
@@ -23,7 +25,7 @@ host.innerHTML = `
     <span id="status">Load IFC + INAV. Shift-click route points; Alt-click population sources.</span>
   </div>
   <div class="door-panel">
-    <label>Blocked door IDs <input id="blocked" placeholder="door:GUID, door:GUID"/></label>
+    <label>Blocked door IDs <input id="blocked" placeholder="advanced: door IDs"/></label>
     <button id="apply-blocked">Apply + reroute</button>
     <span id="door-count"></span>
   </div>
@@ -42,15 +44,32 @@ host.innerHTML = `
     <label>Per source <input id="source-count" type="number" min="1" max="5000" value="25"/> agents</label>
     <label>Walk <input id="source-speed" type="number" min="0.2" max="3" step="0.05" value="1.2"/> m/s</label>
     <label>Spacing <input id="source-spacing" type="number" min="0.2" max="2" step="0.05" value="0.45"/> m</label>
-    <label>Blocked spaces <input id="blocked-spaces" placeholder="space GUIDs"/></label>
-    <label>Hazard costs <input id="space-costs" placeholder="space=3, space=1.5"/></label>
+    <label>Blocked spaces <input id="blocked-spaces" placeholder="advanced: space IDs"/></label>
+    <label>Hazard costs <input id="space-costs" placeholder="advanced: space=3"/></label>
     <button id="study-health">Check server</button>
     <button id="study-clear">Clear sources</button>
     <button id="study-run">Run study</button>
     <span id="study-status">Alt-click navigation surface to place population sources.</span>
   </div>
-  <div class="legend"><span class="open"></span>open <span class="stair"></span>stair <span class="ramp"></span>ramp <span class="source"></span>population</div>
+  <div class="scenario-panel">
+    <b>Visual scenario</b>
+    <label>Edit mode
+      <select id="scenario-mode">
+        <option value="navigate">Navigate</option>
+        <option value="population">Population</option>
+        <option value="block-space">Block space</option>
+        <option value="hazard-space">Hazard space</option>
+        <option value="block-door">Block nearest door</option>
+      </select>
+    </label>
+    <label>Hazard x <input id="hazard-multiplier" type="number" min="1" max="100" step="0.5" value="3"/></label>
+    <button id="scenario-clear">Clear scenario</button>
+    <span id="scenario-status">Choose a mode, then click the navigation surface.</span>
+  </div>
+  <div id="analytics" class="analytics-panel"></div>
+  <div class="legend"><span class="open"></span>open <span class="stair"></span>stair <span class="ramp"></span>ramp <span class="source"></span>population <span class="hazard"></span>hazard <span class="blocked"></span>blocked</div>
 `;
+
 const viewport = document.querySelector<HTMLDivElement>("#viewport")!;
 const status = document.querySelector<HTMLSpanElement>("#status")!;
 const agentInput = document.querySelector<HTMLInputElement>("#agents")!;
@@ -71,6 +90,9 @@ const blockedSpacesInput = document.querySelector<HTMLInputElement>("#blocked-sp
 const spaceCostsInput = document.querySelector<HTMLInputElement>("#space-costs")!;
 const studyStatus = document.querySelector<HTMLSpanElement>("#study-status")!;
 const studyRunButton = document.querySelector<HTMLButtonElement>("#study-run")!;
+const scenarioMode = document.querySelector<HTMLSelectElement>("#scenario-mode")!;
+const hazardMultiplier = document.querySelector<HTMLInputElement>("#hazard-multiplier")!;
+const scenarioStatus = document.querySelector<HTMLSpanElement>("#scenario-status")!;
 
 const components = new OBC.Components();
 const worlds = components.get(OBC.Worlds);
@@ -111,6 +133,8 @@ const nav = new InavScene(world.scene.three);
 const crowd = new CrowdLayer(world.scene.three);
 const playback = new SimulationPlaybackLayer(world.scene.three);
 const study = new StudyScenarioLayer(world.scene.three);
+const scenario = new ScenarioEditorLayer(world.scene.three);
+const analytics = new StudyAnalyticsPanel(document.querySelector<HTMLElement>("#analytics")!);
 let loadedModel: InavModel | null = null;
 let start: SurfacePick | null = null;
 let goal: SurfacePick | null = null;
@@ -149,6 +173,9 @@ function clearRoute() {
 function splitIds(value: string) {
   return value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
 }
+function mergeIds(...collections: string[][]) {
+  return [...new Set(collections.flat())].sort();
+}
 function blockedIds() { return splitIds(blockedInput.value); }
 function parseSpaceCosts() {
   const result: Record<string, number> = {};
@@ -160,30 +187,43 @@ function parseSpaceCosts() {
   }
   return result;
 }
+function effectiveScenario() {
+  const visual = scenario.state();
+  return {
+    blockedPortals: mergeIds(blockedIds(), visual.blockedPortals),
+    blockedSpaces: mergeIds(splitIds(blockedSpacesInput.value), visual.blockedSpaces),
+    spaceCostMultipliers: { ...parseSpaceCosts(), ...visual.spaceCostMultipliers },
+  };
+}
 function updateSourceStatus(prefix = "") {
   studyStatus.textContent = `${prefix}${study.count} source(s) · ${study.agentCount} planned agent(s)`;
 }
+function updateScenarioStatus(message?: string) {
+  scenarioStatus.textContent = `${message ? `${message} ` : ""}${scenario.describe()}`;
+}
 
 function reroute() {
-  nav.setBlockedPortalIds(blockedIds());
+  const effective = effectiveScenario();
+  nav.setBlockedPortalIds(effective.blockedPortals);
   if (!start || !goal) {
-    status.textContent = `${blockedIds().length} door crossing(s) blocked.`;
+    status.textContent = `${effective.blockedPortals.length} door crossing(s) blocked.`;
     return;
   }
   currentRoute = nav.route(start, goal);
   nav.drawRoute(currentRoute, start.point, goal.point);
   if (!currentRoute.length) {
     crowd.clear();
-    status.textContent = `No route with ${blockedIds().length} blocked door(s).`;
+    status.textContent = `No route with ${effective.blockedPortals.length} blocked door(s).`;
     return;
   }
   rebuildCrowd();
-  status.textContent = `Funnel route ${nav.routeLength(currentRoute).toFixed(1)} m · ${currentRoute.length} corners · ${blockedIds().length} blocked door(s).`;
+  status.textContent = `Funnel route ${nav.routeLength(currentRoute).toFixed(1)} m · ${currentRoute.length} corners · ${effective.blockedPortals.length} blocked door(s).`;
 }
 
 function loadPlayback(data: PlaybackFile, message: string) {
   crowd.clear();
   playback.load(data);
+  analytics.render(data);
   simTime.min = "0";
   simTime.max = String(playback.durationS);
   simTime.value = "0";
@@ -207,15 +247,18 @@ document.querySelector<HTMLInputElement>("#inav")!.onchange = async (event) => {
   const model = JSON.parse(await file.text()) as InavModel;
   loadedModel = model;
   nav.load(model);
+  scenario.load(model);
+  analytics.clear();
   playback.clear();
   study.clear();
   updateSourceStatus();
+  updateScenarioStatus();
   clearRoute();
   const doors = nav.portalIds();
   doorCount.textContent = `${doors.length} door portal(s)`;
   doorCount.title = doors.join("\n");
   frameNavigation();
-  status.textContent = `${model.cells?.length ?? 0} navigation cells loaded. Shift-click route; Alt-click population.`;
+  status.textContent = `${model.cells?.length ?? 0} navigation cells loaded. Shift-click route; Alt-click population; visual edit modes use plain click.`;
 };
 
 document.querySelector<HTMLInputElement>("#human")!.onchange = async (event) => {
@@ -263,6 +306,14 @@ document.querySelector<HTMLButtonElement>("#study-clear")!.onclick = () => {
   study.clear();
   updateSourceStatus();
 };
+document.querySelector<HTMLButtonElement>("#scenario-clear")!.onclick = () => {
+  scenario.clear();
+  blockedInput.value = "";
+  blockedSpacesInput.value = "";
+  spaceCostsInput.value = "";
+  updateScenarioStatus("Scenario cleared.");
+  reroute();
+};
 document.querySelector<HTMLButtonElement>("#study-health")!.onclick = async () => {
   studyStatus.textContent = "Checking study server…";
   try {
@@ -279,14 +330,15 @@ studyRunButton.onclick = async () => {
     studyStatus.textContent = "Load an INAV model first.";
     return;
   }
+  const effective = effectiveScenario();
   studyRunButton.disabled = true;
-  studyStatus.textContent = `Running ${study.agentCount} agents…`;
+  studyStatus.textContent = `Running ${study.agentCount} agents · ${scenario.describe()}…`;
   try {
     const result = await runLiveStudy(studyApi.value, loadedModel, study.values(), {
       backend: studyBackend.value as "kinematic" | "jupedsim",
-      blockedPortals: blockedIds(),
-      blockedSpaces: splitIds(blockedSpacesInput.value),
-      spaceCostMultipliers: parseSpaceCosts(),
+      blockedPortals: effective.blockedPortals,
+      blockedSpaces: effective.blockedSpaces,
+      spaceCostMultipliers: effective.spaceCostMultipliers,
       frameIntervalS: 0.20,
       maxTimeS: 900,
     });
@@ -304,10 +356,18 @@ studyRunButton.onclick = async () => {
 };
 
 const canvas = world.renderer.three.domElement;
-let pointerDown: { x: number; y: number; mode: "route" | "population" } | null = null;
+type PointerMode = "route" | "population" | "scenario";
+let pointerDown: { x: number; y: number; mode: PointerMode } | null = null;
 canvas.addEventListener("pointerdown", (event) => {
   if (event.altKey) pointerDown = { x: event.clientX, y: event.clientY, mode: "population" };
   else if (event.shiftKey) pointerDown = { x: event.clientX, y: event.clientY, mode: "route" };
+  else if (scenarioMode.value !== "navigate") {
+    pointerDown = {
+      x: event.clientX,
+      y: event.clientY,
+      mode: scenarioMode.value === "population" ? "population" : "scenario",
+    };
+  }
 });
 canvas.addEventListener("pointerup", (event) => {
   if (!pointerDown) return;
@@ -328,6 +388,16 @@ canvas.addEventListener("pointerup", (event) => {
       Number(sourceSpacing.value),
     );
     updateSourceStatus("Population added · ");
+    return;
+  }
+  if (state.mode === "scenario") {
+    const result = scenario.applyPick(
+      pick,
+      scenarioMode.value as ScenarioEditMode,
+      Number(hazardMultiplier.value),
+    );
+    updateScenarioStatus(result.message);
+    if (result.changed) reroute();
     return;
   }
   if (!start || goal) {

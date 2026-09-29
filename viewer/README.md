@@ -9,17 +9,30 @@ The web viewer consumes the portable `.inav` navigation model next to the origin
 - **Pathfinder-style routing**: weighted cell A* produces a polygon corridor; a classic funnel/string-pull consumes full left/right portal segments to create the route centreline.
 - **JuPedSim / hybrid simulation**: IFCPath owns BIM semantics, route choice, doors, stairs, elevators and queues; JuPedSim owns local collision-avoidance motion inside connected semantic domains.
 - **Live study service**: a local FastAPI endpoint accepts the already-loaded INAV model plus browser-authored populations/scenario state and returns `ifcpath.simulation/0.1` playback.
-- **Three.js overlays**: navmesh terrain, route line, start/end markers, population sources, route-demo crowd and solver playback.
+- **Visual scenario layer**: click-authored blocked spaces, hazard spaces and blocked semantic doors are overlays only; they do not modify the navigation geometry.
+- **Three.js overlays**: navmesh terrain, route line, start/end markers, population sources, scenario state, route-demo crowd and solver playback.
 
 The viewer loads IFC **without coordinate-to-origin transforms**. INAV geometry is generated in IFC world coordinates, so recentering only the BIM would misalign the layers.
 
 ## Interactive routing
 
-1. Load the IFC.
-2. Load its matching `.inav` file.
-3. Shift-click the nav surface for start and destination.
-4. Enter one or more `door:GUID` IDs in **Blocked door IDs** and reroute to test closures.
-5. The displayed route uses the same portal-funnel model as the Python surface router.
+1. Load the IFC and its matching `.inav` file.
+2. **Shift-click** the nav surface for start and destination.
+3. The displayed route uses the same portal-funnel model as the Python surface router.
+4. Door closures authored in the visual scenario editor immediately affect route-demo rerouting too.
+
+## Visual scenario authoring
+
+Raw GUID fields remain available as an advanced/debug path, but normal studies can be authored visually:
+
+1. Choose an **Edit mode** in **Visual scenario**.
+2. Choose **Population** and click a walkable area, or use the **Alt-click** shortcut.
+3. Choose **Block space** and click a room to toggle it red/non-traversable.
+4. Choose **Hazard space**, set the multiplier, and click a room to toggle an orange route-cost region.
+5. Choose **Block nearest door** and click near a semantic door to toggle its red closure marker.
+6. **Clear scenario** removes visual restrictions and the advanced raw scenario fields.
+
+Scenario overlays resolve clicked navigation cells back to semantic spaces and semantic IFC door portals. The overlay never rewrites the qualified navmesh; the resulting IDs/costs are sent to the same Python hierarchical planner used by non-viewer workflows.
 
 ## Live evacuation study
 
@@ -32,22 +45,33 @@ ifcpath-study-server
 
 The default endpoint is `http://127.0.0.1:8765`. The server exposes `/health` and `/study/run`; CORS is limited to the local Vite/preview origins used by this viewer.
 
-Then in the viewer:
+Then:
 
 1. Load IFC + matching INAV.
-2. Press **Check server**. It reports whether JuPedSim is installed.
-3. Choose **JuPedSim** (microscopic movement) or **Kinematic** (dependency-free deterministic fallback).
+2. Press **Check server** to verify JuPedSim availability.
+3. Choose **JuPedSim** or the deterministic **Kinematic** fallback.
 4. Set people per source, walking speed and minimum spawn spacing.
-5. **Alt-click** the navigation surface to add one or more population sources. Each source is expanded deterministically inside the containing walkable space, respecting the requested minimum spacing.
-6. Optionally enter blocked door IDs, blocked space IDs and hazard cost multipliers such as `space-guid=3`.
-7. Press **Run study**. The viewer posts the INAV model and scenario to the local service and immediately loads the returned solver playback.
-8. Use the existing simulation controls to play/pause, scrub time and change playback speed.
+5. Place one or more population sources visually.
+6. Author blocked/hazard areas and doors visually; raw ID fields can still be combined with the visual state.
+7. Press **Run study**. The browser posts the INAV model and scenario to the local service and immediately loads the returned solver playback.
+8. Play/pause, scrub time and change playback speed.
 
-Door/space restrictions and cost multipliers are applied by the same hierarchical route planner used outside the viewer. No browser-only shortcut graph is introduced.
+## Results analytics
+
+Every loaded or newly run `ifcpath.simulation/0.1` result feeds the analytics panel. It shows:
+
+- total, evacuated and trapped agents
+- clearance time and average evacuation time
+- maximum queue
+- simulation duration
+- exit usage
+- a down-sampled timeline of moving, waiting, evacuated and trapped populations
+
+The analytics are derived from the portable playback/summary contract, not from browser-side re-simulation.
 
 ## Offline microscopic simulation playback
 
-The same `ifcpath.simulation/0.1` format can be generated from the CLI:
+The same format can be generated from the CLI:
 
 ```bash
 pip install -e '.[microscopic]'
@@ -69,9 +93,9 @@ Load `playback.json` with **Solver playback**. Agent colors indicate moving/tran
 
 ## Human assets
 
-The route-demo crowd renderer is intentionally asset-independent. A good free starter pack is **Kenney Mini Characters** (`https://kenney.nl/assets/mini-characters`): animated CC0 character files with multiple people variants. Keep third-party binary assets outside the kernel and swap them through the Human GLB input or a deployment asset pipeline.
+The route-demo crowd renderer is asset-independent. **Kenney Mini Characters** is the current lightweight CC0 starter reference. Keep third-party binary assets outside the geometry kernel and swap them through the Human GLB input or a deployment asset pipeline.
 
-Solver playback uses a highly efficient instanced representation so thousands of recorded agent positions can be inspected without requiring one skeleton per pedestrian. The renderer contract is independent of the solver and human asset pack.
+Solver playback uses an efficient instanced representation so thousands of recorded agent positions can be inspected without requiring one skeleton per pedestrian.
 
 ## Viewer development
 
