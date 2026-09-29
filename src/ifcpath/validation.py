@@ -24,7 +24,7 @@ class ValidationReport:
     largest_component_nodes: int
     reachable_node_ratio: float
     issues: list[ValidationIssue] = field(default_factory=list)
-    stats: dict[str, int | float] = field(default_factory=dict)
+    stats: dict[str, int | float | bool] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -280,6 +280,20 @@ def validate_model(model: InavModel) -> ValidationReport:
             "Vertical circulation geometry exists but produced no inter-level semantic transition",
         ))
 
+    levels_without_nav = sum(nodes_by_level.get(level.id, 0) == 0 for level in model.levels)
+    vertical_required = len(model.levels) > 1
+    vertical_ready = (not vertical_required) or bool(vertical_transitions)
+    exits_ready = (not exits) or exit_unreachable_nodes == 0
+    navigation_ready = (
+        bool(node_ids)
+        and component_count == 1
+        and levels_without_nav == 0
+        and vertical_ready
+        and exits_ready
+        and portal_side_failures == 0
+        and split_spaces == 0
+    )
+
     error_count = sum(issue.severity == "error" for issue in issues)
     warning_count = sum(issue.severity == "warning" for issue in issues)
     return ValidationReport(
@@ -310,6 +324,8 @@ def validate_model(model: InavModel) -> ValidationReport:
             "elevator_nodes": vertical_node_counts["elevator"],
             "vertical_levels": len(vertical_levels),
             "vertical_transitions": len(vertical_transitions),
+            "levels_without_nav": levels_without_nav,
+            "navigation_ready": navigation_ready,
         },
     )
 

@@ -476,8 +476,17 @@ class IFCPathBuilderWindow(QMainWindow):
         self.card_nodes.set_value(len(model.nodes))
         errors = int(report.stats.get("errors", 0))
         warnings = int(report.stats.get("warnings", 0))
-        self.card_status.set_value("Ready" if report.valid and errors == 0 else f"{errors} error(s)")
-        self.card_status.setToolTip(f"{errors} errors, {warnings} warnings")
+        navigation_ready = bool(report.stats.get("navigation_ready", False))
+        if errors:
+            status = f"{errors} error(s)"
+        elif navigation_ready:
+            status = "Ready"
+        else:
+            status = "Not routable"
+        self.card_status.set_value(status)
+        self.card_status.setToolTip(
+            f"{errors} errors, {warnings} warnings; navigation ready={navigation_ready}"
+        )
 
         self.level_combo.blockSignals(True)
         self.level_combo.clear()
