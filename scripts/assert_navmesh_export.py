@@ -30,7 +30,14 @@ def main() -> None:
         fail("duplicate navmesh cell IDs")
 
     known_spaces = {space.id for space in model.spaces}
+    known_portals = {portal.id for portal in model.portals}
+    internal_doors = {
+        portal.id
+        for portal in model.portals
+        if portal.kind == "door" and portal.from_space_id and portal.to_space_id
+    }
     spaces_with_cells: set[str] = set()
+    semantic_surface_crossings: set[str] = set()
 
     for cell in model.cells:
         if cell.space_id is not None and cell.space_id not in known_spaces:
@@ -49,10 +56,20 @@ def main() -> None:
                 fail(f"cell {cell.id} references missing neighbour {neighbour_id}")
             if cell.id not in neighbour.neighbor_ids:
                 fail(f"cell adjacency is not reciprocal: {cell.id} -> {neighbour_id}")
+
+            portal_id = cell.portal_ids.get(neighbour_id)
+            reverse_portal_id = neighbour.portal_ids.get(cell.id)
+            if portal_id != reverse_portal_id:
+                fail(f"semantic portal binding is not reciprocal: {cell.id} -> {neighbour_id}")
+            if portal_id and portal_id not in known_portals:
+                fail(f"cell adjacency references unknown semantic portal {portal_id}")
+
             crosses_space = neighbour.space_id != cell.space_id
             circulation = cell.terrain in {"stair", "ramp"} or neighbour.terrain in {"stair", "ramp"}
-            if crosses_space and not circulation:
-                fail(f"metric cell adjacency crosses spaces without circulation: {cell.id} -> {neighbour_id}")
+            if crosses_space and not circulation and not portal_id:
+                fail(f"metric cell adjacency crosses spaces without circulation/door: {cell.id} -> {neighbour_id}")
+            if crosses_space and portal_id:
+                semantic_surface_crossings.add(portal_id)
             if neighbour.level_id != cell.level_id and not circulation:
                 fail(f"metric cell adjacency crosses levels without circulation: {cell.id} -> {neighbour_id}")
 
@@ -62,6 +79,9 @@ def main() -> None:
             f"expected cells for {expected_cdt_spaces} CDT spaces, "
             f"found {len(spaces_with_cells)}"
         )
+
+    if internal_doors and not semantic_surface_crossings:
+        fail("internal IFC doors exist but none authorize a surface-cell crossing")
 
     nodes_with_cells = [node for node in model.nodes if node.cell_id]
     if not nodes_with_cells:
@@ -73,7 +93,7 @@ def main() -> None:
     print(
         "navmesh export qualification passed: "
         f"cells={len(cells)} spaces={len(spaces_with_cells)} "
-        f"cell_nodes={len(nodes_with_cells)}"
+        f"cell_nodes={len(nodes_with_cells)} door_crossings={len(semantic_surface_crossings)}"
     )
 
 
