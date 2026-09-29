@@ -173,8 +173,15 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             )
             points.extend(sampled)
             point_kinds.extend(["walk"] * len(sampled))
-            vertical_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
-            point_levels.extend([vertical_level_id] * len(sampled))
+            containing_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
+            point_levels.extend([
+                _vertical_point_level_id(
+                    p,
+                    levels,
+                    containing_level_id=containing_level_id,
+                )
+                for p in sampled
+            ])
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
             point_cell_ids.extend([None] * len(sampled))
 
@@ -523,6 +530,35 @@ def _contained_levels(model, levels: list[Level]):
         level_id = by_guid.get(structure.GlobalId)
         for element in rel.RelatedElements:
             yield element.id(), level_id
+
+
+def _vertical_point_level_id(
+    point: tuple[float, float, float],
+    levels: list[Level],
+    *,
+    containing_level_id: str | None,
+) -> str | None:
+    """Assign a stair/ramp sample to the served storey band containing its Z.
+
+    A flight belongs spatially to one IfcBuildingStorey but physically spans
+    toward the next one. Using the containing storey for every sample collapses
+    a multi-level connector into one semantic level. Storey elevations define
+    half-open vertical bands; samples at/above the next elevation therefore
+    attach to that next level.
+    """
+    if not levels:
+        return containing_level_id
+    ordered = sorted(levels, key=lambda level: (level.elevation_m, level.id))
+    z = float(point[2])
+    selected = ordered[0].id
+    for level in ordered:
+        if z + 1e-6 >= float(level.elevation_m):
+            selected = level.id
+        else:
+            break
+    if containing_level_id and all(level.id != selected for level in ordered):
+        return containing_level_id
+    return selected
 
 
 def _spatial_level_id(entity, level_by_entity: dict[int, str | None], level_by_guid: dict[str, str]) -> str | None:
