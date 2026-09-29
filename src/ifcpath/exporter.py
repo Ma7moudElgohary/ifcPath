@@ -4,12 +4,27 @@ import json
 from pathlib import Path
 
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, SemanticTransition, Space
+from .open_space_adjacency import connect_open_space_boundaries
 from .semantic import ensure_semantic_transitions
 from .surface_portals import bind_semantic_surface_portals
 from .vertical_surface import ensure_surface_vertical_transitions
 
 
 def _ensure_portable_semantics(model: InavModel) -> None:
+    # First recover only exact/coincident open-plan space boundaries. Wider
+    # geometric gaps require loader-side wall qualification and are deliberately
+    # not inferred here from portable data alone.
+    open_stats = connect_open_space_boundaries(
+        model,
+        [],
+        max_gap_m=1e-4,
+        max_vertical_gap_m=1e-4,
+    )
+    if open_stats.connected:
+        model.metadata["surface_open_boundary_count"] = sum(
+            portal.kind == "open_boundary" for portal in model.portals
+        )
+
     # Surface-derived stairs/ramps are authoritative for walkable vertical
     # circulation. Add those semantic transitions before the sampled-node
     # compatibility inference so the portable file preserves them explicitly.
