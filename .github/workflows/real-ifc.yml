@@ -34,12 +34,15 @@ jobs:
             --floor-spacing 1.0 \
             --stair-spacing 0.25 \
             --connect-distance 1.5
-      - name: Validate generated INAV
+      - name: Validate generated INAV and route quality
         run: |
           ifcpath validate /tmp/Duplex_A_20110907.inav --json > /tmp/qualification.json
           cat /tmp/qualification.json
           python scripts/assert_reference_qualification.py /tmp/qualification.json
           python scripts/assert_navmesh_export.py /tmp/Duplex_A_20110907.inav
+          python scripts/assert_surface_route_benchmark.py \
+            /tmp/Duplex_A_20110907.inav \
+            /tmp/surface_route_benchmark.json
       - name: Run real-building crowd evacuation qualification
         run: |
           python scripts/assert_evacuation_qualification.py \
@@ -52,4 +55,5 @@ jobs:
           path: |
             /tmp/Duplex_A_20110907.inav
             /tmp/qualification.json
+            /tmp/surface_route_benchmark.json
             /tmp/evacuation_qualification.json
