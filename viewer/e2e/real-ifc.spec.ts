@@ -17,9 +17,12 @@ test("real IFC renders and builds a ready INAV in the browser", async ({ page })
   await page.locator("#study-api").fill(baseUrl);
   await page.locator("#ifc").setInputFiles(path.resolve(ifcPath!));
 
+  await waitForTerminalState(page, "inavBuild", 210_000);
+  await waitForTerminalState(page, "ifcViewer", 210_000);
+
   const html = page.locator("html");
-  await expect(html).toHaveAttribute("data-inav-build", "ready", { timeout: 210_000 });
-  await expect(html).toHaveAttribute("data-ifc-viewer", "ready", { timeout: 210_000 });
+  expect(await html.getAttribute("data-inav-build"), await html.getAttribute("data-inav-error") ?? "INAV build failed").toBe("ready");
+  expect(await html.getAttribute("data-ifc-viewer"), await html.getAttribute("data-ifc-viewer-error") ?? "IFC viewer failed").toBe("ready");
   await expect(html).toHaveAttribute("data-inav-ready", "true");
 
   const cellCount = Number(await html.getAttribute("data-inav-cells"));
@@ -33,3 +36,18 @@ test("real IFC renders and builds a ready INAV in the browser", async ({ page })
   await expect(page.locator("#study-run")).toBeEnabled();
   expect(pageErrors).toEqual([]);
 });
+
+async function waitForTerminalState(
+  page: import("@playwright/test").Page,
+  datasetKey: "inavBuild" | "ifcViewer",
+  timeout: number,
+) {
+  await page.waitForFunction(
+    ({ key }) => {
+      const value = document.documentElement.dataset[key];
+      return value === "ready" || value === "error";
+    },
+    { key: datasetKey },
+    { timeout },
+  );
+}
