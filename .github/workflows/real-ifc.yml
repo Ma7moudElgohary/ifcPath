@@ -54,6 +54,8 @@ jobs:
           python scripts/assert_surface_vertical_qualification.py \
             /tmp/Duplex_A_20110907.inav \
             /tmp/surface_vertical_qualification.json
+      - name: Qualify browser IFC auto-build path
+        run: python scripts/assert_local_app_build.py /tmp/Duplex_A_20110907.ifc
       - name: Run real-building crowd evacuation qualification
         run: |
           python scripts/assert_evacuation_qualification.py \
