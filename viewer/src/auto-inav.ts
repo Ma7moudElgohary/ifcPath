@@ -26,6 +26,10 @@ async function attachAutoBuild() {
     if (!file) return;
     const apiInput = document.querySelector<HTMLInputElement>("#study-api");
     const apiBase = (apiInput?.value || window.location.origin).replace(/\/$/, "");
+    const root = document.documentElement;
+    root.dataset.inavBuild = "building";
+    delete root.dataset.inavCells;
+    delete root.dataset.inavReady;
     status.textContent = "Building continuous navigation surface from IFC…";
 
     try {
@@ -64,10 +68,18 @@ async function attachAutoBuild() {
       transfer.items.add(generated);
       inavInput.files = transfer.files;
       inavInput.dispatchEvent(new Event("change", { bubbles: true }));
+
+      root.dataset.inavCells = String(cells);
+      root.dataset.inavReady = String(ready === true);
+      root.dataset.inavBuild = "ready";
+      root.dispatchEvent(new CustomEvent("ifcpath:inav-ready", { detail: { cells, ready: ready === true } }));
       status.textContent = `IFC navigation built automatically · ${cells} cells${ready === true ? " · ready" : ""}`;
     } catch (error) {
       // Manual .inav loading remains available if the API is not running.
       const message = error instanceof Error ? error.message : String(error);
+      root.dataset.inavBuild = "error";
+      root.dataset.inavReady = "false";
+      root.dataset.inavError = message;
       status.textContent = `IFC loaded visually; automatic INAV build unavailable (${message}). You can still load an INAV manually.`;
     }
   });
