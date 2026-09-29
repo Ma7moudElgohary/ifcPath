@@ -13,14 +13,27 @@ host.innerHTML = `
     <label>INAV <input id="inav" type="file" accept=".inav,.json"/></label>
     <label>Human GLB <input id="human" type="file" accept=".glb,.gltf"/></label>
     <label>Agents <input id="agents" type="number" min="1" max="2000" value="100"/></label>
+    <label>Speed <input id="speed" type="number" min="0.1" max="5" step="0.1" value="1"/></label>
+    <label><input id="nav-visible" type="checkbox" checked/> Nav surface</label>
+    <button id="play">Pause crowd</button>
+    <button id="fit">Fit navigation</button>
     <button id="clear">Clear route</button>
     <span id="status">Load IFC + INAV. Shift-click navigation surface for start and end.</span>
+  </div>
+  <div class="door-panel">
+    <label>Blocked door IDs <input id="blocked" placeholder="door:GUID, door:GUID"/></label>
+    <button id="apply-blocked">Apply + reroute</button>
+    <span id="door-count"></span>
   </div>
   <div class="legend"><span class="open"></span>open <span class="stair"></span>stair <span class="ramp"></span>ramp</div>
 `;
 const viewport = document.querySelector<HTMLDivElement>("#viewport")!;
 const status = document.querySelector<HTMLSpanElement>("#status")!;
 const agentInput = document.querySelector<HTMLInputElement>("#agents")!;
+const speedInput = document.querySelector<HTMLInputElement>("#speed")!;
+const blockedInput = document.querySelector<HTMLInputElement>("#blocked")!;
+const doorCount = document.querySelector<HTMLSpanElement>("#door-count")!;
+const playButton = document.querySelector<HTMLButtonElement>("#play")!;
 
 const components = new OBC.Components();
 const worlds = components.get(OBC.Worlds);
@@ -55,18 +68,41 @@ fragments.list.onItemSet.add(({ value: model }) => {
 });
 
 const ifcLoader = components.get(OBC.IfcLoader);
-await ifcLoader.setup({ autoSetWasm: true });
+await ifcLoader.setup({
+  autoSetWasm: true,
+  // IFCPath INAV uses IFC world coordinates. Do not recenter either WebIFC or
+  // Fragments, otherwise BIM geometry and navigation geometry drift apart.
+  webIfc: { COORDINATE_TO_ORIGIN: false },
+});
+
 const nav = new InavScene(world.scene.three);
 const crowd = new CrowdLayer(world.scene.three);
-
 let start: SurfacePick | null = null;
 let goal: SurfacePick | null = null;
 let currentRoute: Vec3[] = [];
+let paused = false;
 
 function rebuildCrowd() {
   if (currentRoute.length < 2) return;
   const count = Math.max(1, Math.min(2000, Number(agentInput.value) || 100));
   crowd.spawnRouteAgents(currentRoute.map(toThree), count);
+}
+
+function frameNavigation() {
+  const box = nav.bounds();
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z, 4) * 1.25;
+  void world.camera.controls.setLookAt(
+    center.x + radius,
+    center.y + radius * 0.75,
+    center.z + radius,
+    center.x,
+    center.y,
+    center.z,
+    true,
+  );
 }
 
 function clearRoute() {
@@ -78,13 +114,34 @@ function clearRoute() {
   status.textContent = "Shift-click navigation surface to choose a start point.";
 }
 
+function blockedIds() {
+  return blockedInput.value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+function reroute() {
+  nav.setBlockedPortalIds(blockedIds());
+  if (!start || !goal) {
+    status.textContent = `${blockedIds().length} door crossing(s) blocked.`;
+    return;
+  }
+  currentRoute = nav.route(start, goal);
+  nav.drawRoute(currentRoute, start.point, goal.point);
+  if (!currentRoute.length) {
+    crowd.clear();
+    status.textContent = `No route with ${blockedIds().length} blocked door(s).`;
+    return;
+  }
+  rebuildCrowd();
+  status.textContent = `Route ${nav.routeLength(currentRoute).toFixed(1)} m · ${currentRoute.length} waypoints · ${blockedIds().length} blocked door(s).`;
+}
+
 document.querySelector<HTMLInputElement>("#ifc")!.onchange = async (event) => {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
-  status.textContent = "Importing IFC…";
+  status.textContent = "Importing IFC with That Open…";
   const bytes = new Uint8Array(await file.arrayBuffer());
-  await ifcLoader.load(bytes, true, file.name.replace(/\.ifc$/i, ""));
-  status.textContent = "IFC loaded. Load matching INAV to route.";
+  await ifcLoader.load(bytes, false, file.name.replace(/\.ifc$/i, ""));
+  status.textContent = "IFC loaded in original coordinates. Load matching INAV to route.";
 };
 
 document.querySelector<HTMLInputElement>("#inav")!.onchange = async (event) => {
@@ -93,6 +150,10 @@ document.querySelector<HTMLInputElement>("#inav")!.onchange = async (event) => {
   const model = JSON.parse(await file.text());
   nav.load(model);
   clearRoute();
+  const doors = nav.portalIds();
+  doorCount.textContent = `${doors.length} door portal(s)`;
+  doorCount.title = doors.join("\n");
+  frameNavigation();
   status.textContent = `${model.cells?.length ?? 0} navigation cells loaded. Shift-click start and end.`;
 };
 
@@ -102,11 +163,22 @@ document.querySelector<HTMLInputElement>("#human")!.onchange = async (event) => 
   status.textContent = "Loading animated human GLB…";
   await crowd.loadHuman(file);
   rebuildCrowd();
-  status.textContent = "Human asset ready. First 64 agents use the animated model; larger crowds are instanced.";
+  status.textContent = "Human asset ready. Up to 64 animated GLB agents + instanced large crowd.";
 };
 
 document.querySelector<HTMLButtonElement>("#clear")!.onclick = clearRoute;
+document.querySelector<HTMLButtonElement>("#fit")!.onclick = frameNavigation;
+document.querySelector<HTMLButtonElement>("#apply-blocked")!.onclick = reroute;
+document.querySelector<HTMLInputElement>("#nav-visible")!.onchange = (event) => {
+  nav.setVisible((event.target as HTMLInputElement).checked);
+};
 agentInput.onchange = rebuildCrowd;
+speedInput.onchange = () => crowd.setSpeedMultiplier(Number(speedInput.value));
+playButton.onclick = () => {
+  paused = !paused;
+  crowd.setPaused(paused);
+  playButton.textContent = paused ? "Resume crowd" : "Pause crowd";
+};
 
 const canvas = world.renderer.three.domElement;
 let pointerDown: { x: number; y: number } | null = null;
@@ -133,15 +205,7 @@ canvas.addEventListener("pointerup", (event) => {
     return;
   }
   goal = pick;
-  currentRoute = nav.route(start, goal);
-  nav.drawRoute(currentRoute, start.point, goal.point);
-  if (!currentRoute.length) {
-    status.textContent = `No connected surface route from ${start.cellId} to ${goal.cellId}.`;
-    crowd.clear();
-    return;
-  }
-  rebuildCrowd();
-  status.textContent = `Route ready: ${currentRoute.length} waypoints. ${agentInput.value} agents.`;
+  reroute();
 });
 
 let last = performance.now();
