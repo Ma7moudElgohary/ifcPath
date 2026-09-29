@@ -20,6 +20,7 @@ class Space:
     level_id: str | None
     centroid_m: Vec3 | None = None
     ifc_guid: str | None = None
+    is_external: bool = False
 
 
 @dataclass(slots=True)
