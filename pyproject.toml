@@ -50,6 +50,7 @@ desktop-build = [
 ifcpath = "ifcpath.cli:main"
 ifcpath-builder = "ifcpath.builder_app:main"
 ifcpath-study-server = "ifcpath.study_api:main"
+ifcpath-app = "ifcpath.app_runner:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ifcpath"]
