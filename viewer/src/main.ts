@@ -1,9 +1,10 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import "./style.css";
-import { InavScene, SurfacePick, toThree, Vec3 } from "./inav-scene";
+import { InavModel, InavScene, SurfacePick, toThree, Vec3 } from "./inav-scene";
 import { CrowdLayer } from "./crowd";
 import { PlaybackFile, SimulationPlaybackLayer } from "./playback";
+import { checkStudyServer, runLiveStudy, StudyScenarioLayer } from "./study-client";
 
 const host = document.querySelector<HTMLDivElement>("#app")!;
 host.innerHTML = `
@@ -19,7 +20,7 @@ host.innerHTML = `
     <button id="play">Pause route demo</button>
     <button id="fit">Fit navigation</button>
     <button id="clear">Clear route</button>
-    <span id="status">Load IFC + INAV. Shift-click navigation surface for start and end.</span>
+    <span id="status">Load IFC + INAV. Shift-click route points; Alt-click population sources.</span>
   </div>
   <div class="door-panel">
     <label>Blocked door IDs <input id="blocked" placeholder="door:GUID, door:GUID"/></label>
@@ -33,7 +34,22 @@ host.innerHTML = `
     <label>x <input id="sim-speed" type="number" min="0.1" max="8" step="0.1" value="1"/></label>
     <span id="sim-status">No playback loaded</span>
   </div>
-  <div class="legend"><span class="open"></span>open <span class="stair"></span>stair <span class="ramp"></span>ramp</div>
+  <div class="study-panel">
+    <label>API <input id="study-api" value="http://127.0.0.1:8765"/></label>
+    <label>Backend
+      <select id="study-backend"><option value="jupedsim">JuPedSim</option><option value="kinematic">Kinematic</option></select>
+    </label>
+    <label>Per source <input id="source-count" type="number" min="1" max="5000" value="25"/> agents</label>
+    <label>Walk <input id="source-speed" type="number" min="0.2" max="3" step="0.05" value="1.2"/> m/s</label>
+    <label>Spacing <input id="source-spacing" type="number" min="0.2" max="2" step="0.05" value="0.45"/> m</label>
+    <label>Blocked spaces <input id="blocked-spaces" placeholder="space GUIDs"/></label>
+    <label>Hazard costs <input id="space-costs" placeholder="space=3, space=1.5"/></label>
+    <button id="study-health">Check server</button>
+    <button id="study-clear">Clear sources</button>
+    <button id="study-run">Run study</button>
+    <span id="study-status">Alt-click navigation surface to place population sources.</span>
+  </div>
+  <div class="legend"><span class="open"></span>open <span class="stair"></span>stair <span class="ramp"></span>ramp <span class="source"></span>population</div>
 `;
 const viewport = document.querySelector<HTMLDivElement>("#viewport")!;
 const status = document.querySelector<HTMLSpanElement>("#status")!;
@@ -46,6 +62,15 @@ const simPlayButton = document.querySelector<HTMLButtonElement>("#sim-play")!;
 const simTime = document.querySelector<HTMLInputElement>("#sim-time")!;
 const simSpeed = document.querySelector<HTMLInputElement>("#sim-speed")!;
 const simStatus = document.querySelector<HTMLSpanElement>("#sim-status")!;
+const studyApi = document.querySelector<HTMLInputElement>("#study-api")!;
+const studyBackend = document.querySelector<HTMLSelectElement>("#study-backend")!;
+const sourceCount = document.querySelector<HTMLInputElement>("#source-count")!;
+const sourceSpeed = document.querySelector<HTMLInputElement>("#source-speed")!;
+const sourceSpacing = document.querySelector<HTMLInputElement>("#source-spacing")!;
+const blockedSpacesInput = document.querySelector<HTMLInputElement>("#blocked-spaces")!;
+const spaceCostsInput = document.querySelector<HTMLInputElement>("#space-costs")!;
+const studyStatus = document.querySelector<HTMLSpanElement>("#study-status")!;
+const studyRunButton = document.querySelector<HTMLButtonElement>("#study-run")!;
 
 const components = new OBC.Components();
 const worlds = components.get(OBC.Worlds);
@@ -80,14 +105,13 @@ fragments.list.onItemSet.add(({ value: model }) => {
 });
 
 const ifcLoader = components.get(OBC.IfcLoader);
-await ifcLoader.setup({
-  autoSetWasm: true,
-  webIfc: { COORDINATE_TO_ORIGIN: false },
-});
+await ifcLoader.setup({ autoSetWasm: true, webIfc: { COORDINATE_TO_ORIGIN: false } });
 
 const nav = new InavScene(world.scene.three);
 const crowd = new CrowdLayer(world.scene.three);
 const playback = new SimulationPlaybackLayer(world.scene.three);
+const study = new StudyScenarioLayer(world.scene.three);
+let loadedModel: InavModel | null = null;
 let start: SurfacePick | null = null;
 let goal: SurfacePick | null = null;
 let currentRoute: Vec3[] = [];
@@ -108,13 +132,8 @@ function frameNavigation() {
   const size = box.getSize(new THREE.Vector3());
   const radius = Math.max(size.x, size.y, size.z, 4) * 1.25;
   void world.camera.controls.setLookAt(
-    center.x + radius,
-    center.y + radius * 0.75,
-    center.z + radius,
-    center.x,
-    center.y,
-    center.z,
-    true,
+    center.x + radius, center.y + radius * 0.75, center.z + radius,
+    center.x, center.y, center.z, true,
   );
 }
 
@@ -127,8 +146,22 @@ function clearRoute() {
   status.textContent = "Shift-click navigation surface to choose a start point.";
 }
 
-function blockedIds() {
-  return blockedInput.value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+function splitIds(value: string) {
+  return value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+}
+function blockedIds() { return splitIds(blockedInput.value); }
+function parseSpaceCosts() {
+  const result: Record<string, number> = {};
+  for (const token of spaceCostsInput.value.split(/[,;]+/)) {
+    const [key, raw] = token.split("=").map((x) => x.trim());
+    if (!key || !raw) continue;
+    const value = Number(raw);
+    if (Number.isFinite(value) && value >= 1) result[key] = value;
+  }
+  return result;
+}
+function updateSourceStatus(prefix = "") {
+  studyStatus.textContent = `${prefix}${study.count} source(s) · ${study.agentCount} planned agent(s)`;
 }
 
 function reroute() {
@@ -148,27 +181,41 @@ function reroute() {
   status.textContent = `Funnel route ${nav.routeLength(currentRoute).toFixed(1)} m · ${currentRoute.length} corners · ${blockedIds().length} blocked door(s).`;
 }
 
+function loadPlayback(data: PlaybackFile, message: string) {
+  crowd.clear();
+  playback.load(data);
+  simTime.min = "0";
+  simTime.max = String(playback.durationS);
+  simTime.value = "0";
+  simPlayButton.textContent = "Play simulation";
+  simStatus.textContent = `${playback.backend} · ${playback.durationS.toFixed(1)} s`;
+  status.textContent = message;
+}
+
 document.querySelector<HTMLInputElement>("#ifc")!.onchange = async (event) => {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
   status.textContent = "Importing IFC with That Open…";
   const bytes = new Uint8Array(await file.arrayBuffer());
   await ifcLoader.load(bytes, false, file.name.replace(/\.ifc$/i, ""));
-  status.textContent = "IFC loaded in original coordinates. Load matching INAV to route.";
+  status.textContent = "IFC loaded in original coordinates. Load matching INAV to route/simulate.";
 };
 
 document.querySelector<HTMLInputElement>("#inav")!.onchange = async (event) => {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
-  const model = JSON.parse(await file.text());
+  const model = JSON.parse(await file.text()) as InavModel;
+  loadedModel = model;
   nav.load(model);
   playback.clear();
+  study.clear();
+  updateSourceStatus();
   clearRoute();
   const doors = nav.portalIds();
   doorCount.textContent = `${doors.length} door portal(s)`;
   doorCount.title = doors.join("\n");
   frameNavigation();
-  status.textContent = `${model.cells?.length ?? 0} navigation cells loaded. Shift-click start and end.`;
+  status.textContent = `${model.cells?.length ?? 0} navigation cells loaded. Shift-click route; Alt-click population.`;
 };
 
 document.querySelector<HTMLInputElement>("#human")!.onchange = async (event) => {
@@ -184,15 +231,7 @@ document.querySelector<HTMLInputElement>("#playback-file")!.onchange = async (ev
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
   try {
-    const data = JSON.parse(await file.text()) as PlaybackFile;
-    crowd.clear();
-    playback.load(data);
-    simTime.min = "0";
-    simTime.max = String(playback.durationS);
-    simTime.value = "0";
-    simPlayButton.textContent = "Play simulation";
-    simStatus.textContent = `${playback.backend} · ${playback.durationS.toFixed(1)} s`;
-    status.textContent = "Loaded microscopic solver playback.";
+    loadPlayback(JSON.parse(await file.text()) as PlaybackFile, "Loaded microscopic solver playback.");
   } catch (error) {
     simStatus.textContent = error instanceof Error ? error.message : "Invalid playback file";
   }
@@ -201,9 +240,7 @@ document.querySelector<HTMLInputElement>("#playback-file")!.onchange = async (ev
 document.querySelector<HTMLButtonElement>("#clear")!.onclick = clearRoute;
 document.querySelector<HTMLButtonElement>("#fit")!.onclick = frameNavigation;
 document.querySelector<HTMLButtonElement>("#apply-blocked")!.onclick = reroute;
-document.querySelector<HTMLInputElement>("#nav-visible")!.onchange = (event) => {
-  nav.setVisible((event.target as HTMLInputElement).checked);
-};
+document.querySelector<HTMLInputElement>("#nav-visible")!.onchange = (event) => nav.setVisible((event.target as HTMLInputElement).checked);
 agentInput.onchange = rebuildCrowd;
 speedInput.onchange = () => crowd.setSpeedMultiplier(Number(speedInput.value));
 playButton.onclick = () => {
@@ -222,19 +259,75 @@ simPlayButton.onclick = () => {
   simPlayButton.textContent = next ? "Pause simulation" : "Play simulation";
 };
 
+document.querySelector<HTMLButtonElement>("#study-clear")!.onclick = () => {
+  study.clear();
+  updateSourceStatus();
+};
+document.querySelector<HTMLButtonElement>("#study-health")!.onclick = async () => {
+  studyStatus.textContent = "Checking study server…";
+  try {
+    const health = await checkStudyServer(studyApi.value);
+    studyStatus.textContent = health.jupedsim_available
+      ? `Server ready · JuPedSim ${health.jupedsim_version ?? "available"}`
+      : "Server ready · JuPedSim not installed (kinematic available)";
+  } catch (error) {
+    studyStatus.textContent = error instanceof Error ? error.message : "Study server unavailable";
+  }
+};
+studyRunButton.onclick = async () => {
+  if (!loadedModel) {
+    studyStatus.textContent = "Load an INAV model first.";
+    return;
+  }
+  studyRunButton.disabled = true;
+  studyStatus.textContent = `Running ${study.agentCount} agents…`;
+  try {
+    const result = await runLiveStudy(studyApi.value, loadedModel, study.values(), {
+      backend: studyBackend.value as "kinematic" | "jupedsim",
+      blockedPortals: blockedIds(),
+      blockedSpaces: splitIds(blockedSpacesInput.value),
+      spaceCostMultipliers: parseSpaceCosts(),
+      frameIntervalS: 0.20,
+      maxTimeS: 900,
+    });
+    loadPlayback(result, "Live evacuation study complete. Solver playback loaded.");
+    playback.setPlaying(true);
+    simPlayButton.textContent = "Pause simulation";
+    const summary = result.summary ?? {};
+    const clearance = Number(summary.clearance_time_s);
+    studyStatus.textContent = `Complete · ${study.agentCount} agents${Number.isFinite(clearance) ? ` · clearance ${clearance.toFixed(1)} s` : ""}`;
+  } catch (error) {
+    studyStatus.textContent = error instanceof Error ? error.message : "Study failed";
+  } finally {
+    studyRunButton.disabled = false;
+  }
+};
+
 const canvas = world.renderer.three.domElement;
-let pointerDown: { x: number; y: number } | null = null;
+let pointerDown: { x: number; y: number; mode: "route" | "population" } | null = null;
 canvas.addEventListener("pointerdown", (event) => {
-  if (event.shiftKey) pointerDown = { x: event.clientX, y: event.clientY };
+  if (event.altKey) pointerDown = { x: event.clientX, y: event.clientY, mode: "population" };
+  else if (event.shiftKey) pointerDown = { x: event.clientX, y: event.clientY, mode: "route" };
 });
 canvas.addEventListener("pointerup", (event) => {
-  if (!event.shiftKey || !pointerDown) return;
-  const movement = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
+  if (!pointerDown) return;
+  const state = pointerDown;
   pointerDown = null;
+  const movement = Math.hypot(event.clientX - state.x, event.clientY - state.y);
   if (movement > 4) return;
   const pick = nav.pick(event.clientX, event.clientY, canvas, world.camera.three);
   if (!pick) {
     status.textContent = "No navigation surface under cursor.";
+    return;
+  }
+  if (state.mode === "population") {
+    study.addSource(
+      pick.point,
+      Number(sourceCount.value),
+      Number(sourceSpeed.value),
+      Number(sourceSpacing.value),
+    );
+    updateSourceStatus("Population added · ");
     return;
   }
   if (!start || goal) {
