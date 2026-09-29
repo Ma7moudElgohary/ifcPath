@@ -22,9 +22,9 @@ def create_preview(kind: PreviewKind, parent=None) -> QWidget:
     if preference in {"gpu", "webgpu", "wgpu"}:
         try:
             if kind in {"scenario", "evacuation"}:
-                from .gpu_scenario_preview import GpuScenarioPreview
+                from .gpu_selectable_preview import GpuSelectableScenarioPreview
 
-                preview = GpuScenarioPreview(parent)
+                preview = GpuSelectableScenarioPreview(parent)
             else:
                 from .gpu_preview import GpuBimPreview
 
