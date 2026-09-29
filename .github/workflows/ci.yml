@@ -17,7 +17,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[test]"
       - run: python -m compileall -q src scripts
-      - run: pytest -q --ignore=tests/test_desktop_builder.py --ignore=tests/test_desktop_simulation.py --ignore=tests/test_desktop_evacuation.py
+      - run: pytest -q --ignore=tests/test_desktop_builder.py --ignore=tests/test_desktop_simulation.py --ignore=tests/test_desktop_evacuation.py --ignore=tests/test_desktop_profiles.py
 
   microscopic-tests:
     runs-on: ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[desktop,test]"
-      - run: pytest -q tests/test_desktop_builder.py tests/test_desktop_simulation.py tests/test_desktop_evacuation.py
+      - run: pytest -q tests/test_desktop_builder.py tests/test_desktop_simulation.py tests/test_desktop_evacuation.py tests/test_desktop_profiles.py
 
   desktop-package-windows:
     runs-on: windows-latest
