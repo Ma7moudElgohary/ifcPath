@@ -177,9 +177,12 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
             point_cell_ids.extend([None] * len(sampled))
 
-    ramp_entities = list(model.by_type("IfcRamp")) + list(model.by_type("IfcRampFlight"))
-    stair_flights = list(model.by_type("IfcStairFlight"))
-    stair_entities = stair_flights if stair_flights else list(model.by_type("IfcStair"))
+    # Prefer decomposed flight geometry per assembly, while preserving monolithic
+    # vertical elements in mixed-authoring IFCs. Sampling both an assembly and
+    # its flights duplicates geometry; using a global "any flight exists" switch
+    # can conversely drop unrelated monolithic stairs.
+    ramp_entities = _vertical_walk_entities(model, "IfcRamp", "IfcRampFlight")
+    stair_entities = _vertical_walk_entities(model, "IfcStair", "IfcStairFlight")
     for entities, spacing, kind in (
         (ramp_entities, options.floor_spacing_m, "ramp"),
         (stair_entities, options.stair_spacing_m, "stair"),
@@ -534,3 +537,34 @@ def _distance_to_box(p, box):
     dy = max(box[1] - p[1], 0.0, p[1] - box[4])
     dz = max(box[2] - p[2], 0.0, p[2] - box[5])
     return (dx * dx + dy * dy + dz * dz) ** 0.5
+
+
+def _vertical_walk_entities(model, assembly_type: str, flight_type: str):
+    """Select vertical walk geometry without duplicating decomposed assemblies.
+
+    IFC permits stairs/ramps either as a monolithic element or as an assembly
+    decomposed into flights/landings. Keep all flights, plus only those parent
+    assemblies that do not actually aggregate a flight of the requested type.
+    This is intentionally decided per assembly so mixed authoring styles in one
+    building remain valid.
+    """
+    flights = list(model.by_type(flight_type))
+    assemblies = list(model.by_type(assembly_type))
+    result = list(flights)
+
+    for assembly in assemblies:
+        has_flight_child = False
+        for relation in getattr(assembly, "IsDecomposedBy", ()) or ():
+            for child in getattr(relation, "RelatedObjects", ()) or ():
+                try:
+                    if child.is_a(flight_type):
+                        has_flight_child = True
+                        break
+                except Exception:
+                    continue
+            if has_flight_child:
+                break
+        if not has_flight_child:
+            result.append(assembly)
+
+    return result
