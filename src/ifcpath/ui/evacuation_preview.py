@@ -14,6 +14,7 @@ class Evacuation3DPreview(Scenario3DPreview):
         super().__init__(parent)
         self._evacuation_poses: dict[str, tuple[Vec3, tuple[float, float], str]] = {}
         self._max_person_meshes = 36
+        self._interactive_person_meshes = 8
 
     @property
     def evacuation_agent_count(self) -> int:
@@ -24,7 +25,7 @@ class Evacuation3DPreview(Scenario3DPreview):
         poses: dict[str, tuple[Vec3, tuple[float, float], str]] | None,
     ) -> None:
         self._evacuation_poses = dict(poses or {})
-        self.redraw(fit=False)
+        self.redraw(fit=False, interactive=self._live_interaction_quality())
 
     def _draw_route(self) -> None:
         super()._draw_route()
@@ -36,8 +37,13 @@ class Evacuation3DPreview(Scenario3DPreview):
             for agent_id, pose in sorted(self._evacuation_poses.items())
             if pose[2] != "evacuated"
         ]
+        mesh_limit = (
+            self._interactive_person_meshes
+            if self._interactive_lod
+            else self._max_person_meshes
+        )
         for index, (_agent_id, (position, forward, status)) in enumerate(visible):
-            if index < self._max_person_meshes:
+            if index < mesh_limit:
                 self._draw_person_mesh(position, forward, status)
             else:
                 self._draw_agent_marker(position, status)

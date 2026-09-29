@@ -25,6 +25,9 @@ class Scenario3DPreview(Projected3DPreview):
         self._agent_position: Vec3 | None = None
         self._agent_forward: tuple[float, float] = (0.0, 1.0)
 
+    def _live_interaction_quality(self) -> bool:
+        return self._navigation_is_active() or self._pan_last is not None
+
     def set_scenario(
         self,
         *,
@@ -37,11 +40,11 @@ class Scenario3DPreview(Projected3DPreview):
         self._blocked_spaces = set(blocked_spaces or ())
         self._space_cost_multipliers = dict(space_cost_multipliers or {})
         self._hazard_kinds = dict(hazard_kinds or {})
-        self.redraw(fit=False)
+        self.redraw(fit=False, interactive=self._live_interaction_quality())
 
     def set_person_visible(self, visible: bool) -> None:
         self._show_person = bool(visible)
-        self.redraw(fit=False)
+        self.redraw(fit=False, interactive=self._live_interaction_quality())
 
     def set_agent_pose(
         self,
@@ -51,7 +54,7 @@ class Scenario3DPreview(Projected3DPreview):
         self._agent_position = position
         if forward is not None:
             self._agent_forward = forward
-        self.redraw(fit=False)
+        self.redraw(fit=False, interactive=self._live_interaction_quality())
 
     @property
     def blocked_portals(self) -> set[str]:
@@ -73,9 +76,9 @@ class Scenario3DPreview(Projected3DPreview):
         super()._draw_navmesh(model)
         outline = QPen(QColor(255, 109, 95, 220), 0.0)
         outline.setCosmetic(True)
-        for cell in model.cells:
-            if self._level_id and cell.level_id != self._level_id:
-                continue
+        # Reuse the base viewport's interaction LOD. Otherwise live hazard
+        # overlays could redraw every navmesh cell while an orbit is in progress.
+        for cell in self._cells_for_render():
             space_id = cell.space_id
             if not space_id:
                 continue
@@ -108,10 +111,8 @@ class Scenario3DPreview(Projected3DPreview):
         radius = max(0.12, self._marker_radius(model) * 1.75)
         pen = QPen(QColor("#ff4f5e"), 0.0)
         pen.setCosmetic(True)
-        for portal in model.portals:
+        for portal in self._portals_for_render():
             if portal.id not in self._blocked_portals:
-                continue
-            if self._level_id and portal.level_id and portal.level_id != self._level_id:
                 continue
             point, depth = self._project(portal.position_m)
             for x1, y1, x2, y2 in (

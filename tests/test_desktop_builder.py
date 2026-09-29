@@ -12,6 +12,7 @@ from ifcpath.model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, S
 from ifcpath.ui.main_window_3d import IFCPathBuilder3DWindow
 from ifcpath.ui.person_mesh import build_person_mesh
 from ifcpath.ui.preview_3d import Projected3DPreview
+from ifcpath.ui.preview_geometry import PreviewGeometry, PreviewTriangle
 from ifcpath.ui.scenario_preview import Scenario3DPreview
 from ifcpath.ui.scenario_window import IFCPathScenarioWindow
 from ifcpath.validation import validate_model
@@ -86,6 +87,75 @@ def test_projected_3d_preview_recovers_world_point_from_cdt_cell() -> None:
     assert point[0] == pytest.approx(expected[0], abs=1e-6)
     assert point[1] == pytest.approx(expected[1], abs=1e-6)
     assert point[2] == pytest.approx(expected[2], abs=1e-6)
+
+    preview.close()
+    app.processEvents()
+
+
+def test_projected_3d_preview_uses_bounded_interaction_lod() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = Projected3DPreview()
+    model = _preview_model()
+    preview.set_model(model)
+
+    triangles = [
+        PreviewTriangle(
+            vertices_m=(
+                (float(index % 50), float(index // 50), 0.0),
+                (float(index % 50) + 0.4, float(index // 50), 0.0),
+                (float(index % 50), float(index // 50) + 0.4, 0.0),
+            ),
+            category="slab",
+            level_id=model.levels[0].id,
+        )
+        for index in range(4000)
+    ]
+    preview.set_bim_geometry(PreviewGeometry(triangles=triangles))
+    full_count = len(preview.scene().items())
+
+    preview.redraw(fit=False, interactive=True)
+    interactive_count = len(preview.scene().items())
+
+    assert full_count > 4000
+    assert interactive_count < full_count
+    assert interactive_count <= preview._navigation.interactive_bim_triangle_limit + 10
+
+    preview.redraw(fit=False, interactive=False)
+    assert len(preview.scene().items()) == full_count
+
+    preview.close()
+    app.processEvents()
+
+
+def test_projected_3d_preview_orbit_target_uses_bounds_not_tessellation_density() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = Projected3DPreview()
+    model = _preview_model()
+    preview.set_model(model)
+
+    # Many triangles near one corner should not drag the orbit target away from
+    # the physical bounds centre.
+    dense = [
+        PreviewTriangle(
+            vertices_m=((0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.0, 0.1, 0.0)),
+            category="slab",
+            level_id=model.levels[0].id,
+        )
+        for _ in range(500)
+    ]
+    dense.append(
+        PreviewTriangle(
+            vertices_m=((10.0, 10.0, 4.0), (9.9, 10.0, 4.0), (10.0, 9.9, 4.0)),
+            category="wall",
+            level_id=model.levels[0].id,
+        )
+    )
+    preview.set_bim_geometry(PreviewGeometry(triangles=dense))
+
+    x, y, z = preview.orbit_target
+    assert x == pytest.approx(5.0, abs=1e-6)
+    assert y == pytest.approx(5.0, abs=1e-6)
+    assert z == pytest.approx(2.0, abs=1e-6)
 
     preview.close()
     app.processEvents()
