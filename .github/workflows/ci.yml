@@ -3,10 +3,54 @@ name: ci
 on:
   push:
     branches: [main, "feature/**"]
-  pull_request:
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      microscopic: ${{ steps.filter.outputs.microscopic }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+      gpu: ${{ steps.filter.outputs.gpu }}
+      viewer: ${{ steps.filter.outputs.viewer }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'src/ifcpath/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'pyproject.toml'
+            microscopic:
+              - 'src/ifcpath/agent_motion.py'
+              - 'src/ifcpath/microscopic_motion.py'
+              - 'src/ifcpath/microscopic_route.py'
+              - 'src/ifcpath/hybrid_evacuation.py'
+              - 'src/ifcpath/elevator_runtime.py'
+              - 'tests/test_microscopic_motion.py'
+              - 'tests/test_hybrid_evacuation.py'
+              - 'tests/test_hybrid_elevator.py'
+              - 'pyproject.toml'
+            desktop:
+              - 'src/ifcpath/ui/**'
+              - 'src/ifcpath/builder_app.py'
+              - 'tests/test_desktop_*.py'
+              - 'tests/test_preview_factory.py'
+              - 'pyproject.toml'
+            gpu:
+              - 'src/ifcpath/ui/gpu_*.py'
+              - 'src/ifcpath/ui/gpu_*/**'
+              - 'tests/test_gpu_*.py'
+              - 'pyproject.toml'
+            viewer:
+              - 'viewer/**'
+
   python-tests:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +64,8 @@ jobs:
       - run: pytest -q --ignore=tests/test_desktop_builder.py --ignore=tests/test_desktop_simulation.py --ignore=tests/test_desktop_evacuation.py --ignore=tests/test_desktop_profiles.py --ignore=tests/test_desktop_gpu_inspector.py --ignore=tests/test_preview_factory.py
 
   microscopic-tests:
+    needs: changes
+    if: needs.changes.outputs.microscopic == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +78,8 @@ jobs:
       - run: pytest -q tests/test_microscopic_motion.py tests/test_hybrid_evacuation.py tests/test_hybrid_elevator.py
 
   desktop-smoke:
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     env:
       QT_QPA_PLATFORM: offscreen
@@ -47,6 +95,8 @@ jobs:
       - run: pytest -q tests/test_desktop_builder.py tests/test_desktop_simulation.py tests/test_desktop_evacuation.py tests/test_desktop_profiles.py tests/test_desktop_gpu_inspector.py tests/test_preview_factory.py
 
   gpu-tests:
+    needs: changes
+    if: needs.changes.outputs.gpu == 'true'
     runs-on: ubuntu-latest
     env:
       QT_QPA_PLATFORM: offscreen
@@ -61,19 +111,17 @@ jobs:
       - run: pip install -e ".[desktop-gpu,test]"
       - run: pytest -q tests/test_gpu_camera.py tests/test_gpu_scene.py tests/test_gpu_culling.py tests/test_gpu_overlay.py tests/test_gpu_selection.py tests/test_gpu_backend.py
 
-  desktop-package-windows:
-    runs-on: windows-latest
+  viewer-build:
+    needs: changes
+    if: needs.changes.outputs.viewer == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: viewer
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -e ".[desktop-build]"
-      - run: python scripts/build_desktop.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: IFCPathBuilder-Windows
-          path: dist/IFCPathBuilder/**
-          if-no-files-found: error
+          node-version: "22"
+      - run: npm install
+      - run: npm run build

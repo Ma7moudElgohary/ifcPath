@@ -3,7 +3,12 @@ name: real-ifc-qualification
 on:
   push:
     branches: [main, "feature/**"]
-  pull_request:
+    paths:
+      - 'src/ifcpath/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.github/workflows/real-ifc.yml'
 
 jobs:
   duplex-reference:
