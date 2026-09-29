@@ -30,6 +30,15 @@ desktop-gpu = [
   "rendercanvas>=2.7,<3; python_version >= '3.11'",
 ]
 microscopic = ["jupedsim==1.4.2"]
+study-server = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+]
+study = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "jupedsim==1.4.2",
+]
 desktop-build = [
   "PySide6>=6.8,<7",
   "wgpu==0.31.1; python_version >= '3.11'",
@@ -40,6 +49,7 @@ desktop-build = [
 [project.scripts]
 ifcpath = "ifcpath.cli:main"
 ifcpath-builder = "ifcpath.builder_app:main"
+ifcpath-study-server = "ifcpath.study_api:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ifcpath"]

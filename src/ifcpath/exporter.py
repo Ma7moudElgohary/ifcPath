@@ -18,8 +18,13 @@ def save_inav(model: InavModel, path: str | Path) -> Path:
     return path
 
 
-def load_inav(path: str | Path) -> InavModel:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+def model_from_dict(raw: dict) -> InavModel:
+    """Build an INAV model from a JSON-compatible dictionary.
+
+    This is the shared deserializer used by file loading and the live study API,
+    keeping browser-posted models on exactly the same semantic/portal binding path
+    as on-disk ``.inav`` files.
+    """
     model = InavModel(
         schema=raw.get("schema", "ifcpath.inav/0.1"),
         units=raw.get("units", "m"),
@@ -36,6 +41,11 @@ def load_inav(path: str | Path) -> InavModel:
     ensure_semantic_transitions(model)
     bind_semantic_surface_portals(model)
     return model
+
+
+def load_inav(path: str | Path) -> InavModel:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return model_from_dict(raw)
 
 
 def _tuple_vec(value: dict, key: str) -> dict:
