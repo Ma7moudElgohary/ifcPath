@@ -68,7 +68,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         space_sources.append((entity, space))
         space_by_entity_id[entity.id()] = space
 
-    boundary_spaces = _boundary_space_map(model, space_by_entity_id)
+    boundary_spaces, external_boundary_elements = _boundary_space_info(model, space_by_entity_id)
     fixed_obstacles = _fixed_obstacles(model, options.fixed_obstacle_classes)
 
     points: list[tuple[float, float, float]] = []
@@ -317,7 +317,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             level_id=level_id,
             width_m=float(getattr(door, "OverallWidth", 0.0) or 0.0) or None,
             ifc_guid=door.GlobalId,
-            is_exit=(len(connected_spaces) == 1),
+            is_exit=_door_is_exit(door, related_element_ids, external_boundary_elements, len(connected_spaces)),
         )
         out.portals.append(portal)
 
@@ -463,8 +463,9 @@ def _spatial_level_id(entity, level_by_entity: dict[int, str | None], level_by_g
     return None
 
 
-def _boundary_space_map(model, space_by_entity_id: dict[int, Space]) -> dict[int, list[Space]]:
+def _boundary_space_info(model, space_by_entity_id: dict[int, Space]) -> tuple[dict[int, list[Space]], set[int]]:
     result: dict[int, list[Space]] = {}
+    external_elements: set[int] = set()
     for relation_type in ("IfcRelSpaceBoundary", "IfcRelSpaceBoundary1stLevel", "IfcRelSpaceBoundary2ndLevel"):
         try:
             relations = model.by_type(relation_type)
@@ -481,7 +482,44 @@ def _boundary_space_map(model, space_by_entity_id: dict[int, Space]) -> dict[int
             bucket = result.setdefault(element.id(), [])
             if all(existing.id != space.id for existing in bucket):
                 bucket.append(space)
-    return result
+            boundary_kind = str(getattr(rel, "InternalOrExternalBoundary", "") or "").upper()
+            if boundary_kind == "EXTERNAL":
+                external_elements.add(element.id())
+    return result, external_elements
+
+
+def _door_is_exit(door, related_element_ids: set[int], external_boundary_elements: set[int], connected_space_count: int) -> bool:
+    """Classify an exterior portal using IFC semantics before geometry fallback."""
+    semantic = _door_external_property(door)
+    if semantic is not None:
+        return semantic
+    if related_element_ids & external_boundary_elements:
+        return True
+    return connected_space_count == 1
+
+
+def _door_external_property(door) -> bool | None:
+    """Read Pset_DoorCommon.IsExternal when authored on occurrence or type."""
+    relationships = list(getattr(door, "IsDefinedBy", ()) or ())
+    for typed_by in getattr(door, "IsTypedBy", ()) or ():
+        relating_type = getattr(typed_by, "RelatingType", None)
+        relationships.extend(getattr(relating_type, "HasPropertySets", ()) or ())
+
+    property_sets = []
+    for relation in relationships:
+        pset = getattr(relation, "RelatingPropertyDefinition", relation)
+        if getattr(pset, "Name", None) == "Pset_DoorCommon":
+            property_sets.append(pset)
+
+    for pset in property_sets:
+        for prop in getattr(pset, "HasProperties", ()) or ():
+            if getattr(prop, "Name", None) != "IsExternal":
+                continue
+            nominal = getattr(prop, "NominalValue", None)
+            value = getattr(nominal, "wrappedValue", nominal)
+            if isinstance(value, bool):
+                return value
+    return None
 
 
 def _space_at_point(point, space_boxes, tolerance_m: float = 0.15) -> str | None:
