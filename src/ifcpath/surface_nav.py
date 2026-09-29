@@ -70,3 +70,56 @@ def find_cell_corridor(cells, start_cell_id, goal_cell_id):
     while result[-1] != start_cell_id:
         result.append(prev[result[-1]])
     return list(reversed(result))
+
+
+
+def stitch_surface_seams(cells, max_gap_m=0.20, max_vertical_gap_m=0.30):
+    """Join separately tessellated walkable elements at genuine boundary seams.
+
+    IFC spaces, slabs and stair flights are tessellated independently, so exact
+    shared vertices are not guaranteed. We only bridge boundary edges whose
+    midpoints are close in 3D and whose vertical separation is pedestrian-scale.
+    """
+    by_id = {cell.id: cell for cell in cells}
+    connected = {tuple(sorted((cell.id, n))) for cell in cells for n in cell.neighbor_ids}
+    boundaries = []
+    edge_counts = defaultdict(int)
+    edge_data = {}
+    scale = 1e5
+    def key(a,b):
+        qa=tuple(round(v*scale) for v in a); qb=tuple(round(v*scale) for v in b)
+        return (qa,qb) if qa <= qb else (qb,qa)
+    for cell in cells:
+        v=cell.vertices_m
+        for a,b in ((v[0],v[1]),(v[1],v[2]),(v[2],v[0])):
+            k=key(a,b); edge_counts[k]+=1; edge_data.setdefault(k,(cell.id,a,b))
+    for k,count in edge_counts.items():
+        if count == 1:
+            cid,a,b=edge_data[k]
+            mid=((a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2)
+            boundaries.append((cid,mid))
+    added=0
+    for i,(aid,am) in enumerate(boundaries):
+        for bid,bm in boundaries[i+1:]:
+            if aid == bid or tuple(sorted((aid,bid))) in connected:
+                continue
+            if by_id[aid].terrain == by_id[bid].terrain == "open" and by_id[aid].space_id != by_id[bid].space_id:
+                continue
+            if abs(am[2]-bm[2]) > max_vertical_gap_m or math.dist(am,bm) > max_gap_m:
+                continue
+            by_id[aid].neighbor_ids.append(bid); by_id[bid].neighbor_ids.append(aid)
+            connected.add(tuple(sorted((aid,bid)))); added+=1
+    return added
+
+
+def surface_components(cells):
+    by_id={c.id:c for c in cells}; remaining=set(by_id); result=[]
+    while remaining:
+        start=remaining.pop(); comp={start}; stack=[start]
+        while stack:
+            cur=stack.pop()
+            for nxt in by_id[cur].neighbor_ids:
+                if nxt in remaining:
+                    remaining.remove(nxt); comp.add(nxt); stack.append(nxt)
+        result.append(comp)
+    return result
