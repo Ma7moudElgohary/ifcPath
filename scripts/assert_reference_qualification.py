@@ -50,6 +50,10 @@ def main() -> None:
         fail(f"reference graph contains isolated navigation nodes: {stats.get('isolated_nodes')}")
     if stats.get("split_spaces", 0) != 0:
         fail(f"IFC spaces are internally split across graph components: {stats.get('split_spaces')}")
+    if not stats.get("navigation_ready", False):
+        fail("reference building is structurally valid but not navigation-ready")
+    if stats.get("vertical_transitions", 0) < 1:
+        fail("multi-level reference building produced no vertical transition")
     if stats.get("exit_reachable_ratio", 0.0) < 0.90:
         fail(
             "too little navigation can reach a classified exit: "
