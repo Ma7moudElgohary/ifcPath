@@ -1,3 +1,5 @@
+export {};
+
 async function attachViewerHealth() {
   const ifcInput = await waitFor<HTMLInputElement>("#ifc");
   const status = await waitFor<HTMLElement>("#status");
