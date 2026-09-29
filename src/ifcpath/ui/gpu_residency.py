@@ -23,6 +23,7 @@ class ResidencyPlan:
     visible_resident: int
     visible_requested: int
     visible_dropped: tuple[str, ...]
+    target_pending: tuple[str, ...]
 
 
 class GpuResidentSet:
@@ -34,9 +35,10 @@ class GpuResidentSet:
     non-visible residents receive a small retention bias to avoid churn during
     small camera movements.
 
-    The budget is a hard cap except when the single highest-priority batch is
-    itself larger than the budget; that one batch is admitted so the viewer can
-    still make progress instead of rendering nothing forever.
+    Static memory and upload work are independently bounded: the resident-set
+    target obeys ``budget_bytes`` while each plan admits only a limited number / 
+    number of bytes of new uploads. Large camera jumps therefore converge over a
+    few frames instead of blocking the UI with a burst of GPU allocation.
     """
 
     def __init__(
@@ -45,10 +47,14 @@ class GpuResidentSet:
         *,
         prefetch_batches: int = 12,
         retention_bias: float = 0.80,
+        max_upload_batches: int = 8,
+        max_upload_bytes: int = 64 * 1024 * 1024,
     ) -> None:
         self.budget_bytes = max(1, int(budget_bytes))
         self.prefetch_batches = max(0, int(prefetch_batches))
         self.retention_bias = min(1.0, max(0.1, float(retention_bias)))
+        self.max_upload_batches = max(1, int(max_upload_batches))
+        self.max_upload_bytes = max(1, int(max_upload_bytes))
         self._catalog: dict[str, ResidentBatchInfo] = {}
         self._resident: set[str] = set()
 
@@ -85,32 +91,55 @@ class GpuResidentSet:
         ranked = ranked_visible + invisible[: self.prefetch_batches]
 
         target: list[str] = []
-        used = 0
+        target_bytes = 0
         for key in ranked:
             size = max(0, self._catalog[key].byte_size)
             if not target and size > self.budget_bytes:
                 target.append(key)
-                used += size
+                target_bytes += size
                 continue
-            if used + size > self.budget_bytes:
+            if target_bytes + size > self.budget_bytes:
                 continue
             target.append(key)
-            used += size
+            target_bytes += size
 
         target_set = set(target)
-        upload = tuple(key for key in target if key not in self._resident)
         evict = tuple(sorted(self._resident - target_set))
-        dropped = tuple(key for key in ranked_visible if key not in target_set)
-        self._resident = target_set
+        retained = self._resident & target_set
+
+        uploads: list[str] = []
+        upload_bytes = 0
+        for key in target:
+            if key in retained:
+                continue
+            size = max(0, self._catalog[key].byte_size)
+            if uploads and (
+                len(uploads) >= self.max_upload_batches
+                or upload_bytes + size > self.max_upload_bytes
+            ):
+                continue
+            # Always admit at least the highest-priority pending batch even if a
+            # single chunk exceeds the per-frame upload target.
+            uploads.append(key)
+            upload_bytes += size
+            if len(uploads) >= self.max_upload_batches:
+                break
+
+        resident = retained | set(uploads)
+        pending = tuple(key for key in target if key not in resident)
+        dropped = tuple(key for key in ranked_visible if key not in resident)
+        self._resident = resident
+        used = sum(self._catalog[key].byte_size for key in resident)
 
         return ResidencyPlan(
-            upload=upload,
+            upload=tuple(uploads),
             evict=evict,
-            resident=tuple(target),
+            resident=tuple(key for key in target if key in resident),
             resident_bytes=used,
-            visible_resident=sum(1 for key in visible if key in target_set),
+            visible_resident=sum(1 for key in visible if key in resident),
             visible_requested=len(visible),
             visible_dropped=dropped,
+            target_pending=pending,
         )
 
     @staticmethod
