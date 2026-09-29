@@ -61,7 +61,23 @@ jobs:
       - run: pip install -e ".[desktop-gpu,test]"
       - run: pytest -q tests/test_gpu_camera.py tests/test_gpu_scene.py tests/test_gpu_culling.py tests/test_gpu_overlay.py tests/test_gpu_selection.py tests/test_gpu_backend.py
 
+  viewer-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: viewer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+      - run: npm install
+      - run: npm run build
+
   desktop-package-windows:
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
