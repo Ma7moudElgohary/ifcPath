@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
-import resource
+import sys
 import time
-from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,6 +13,11 @@ from .hierarchical_routing import find_hierarchical_path
 from .ifc_loader import BuildOptions, build_from_ifc
 from .surface_funnel import find_surface_funnel_route
 from .validation import validate_model
+
+try:  # resource is unavailable on Windows, where qualification may still be run manually.
+    import resource
+except ImportError:  # pragma: no cover - exercised on Windows
+    resource = None
 
 
 _SCHEMA_RE = re.compile(rb"FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'", re.IGNORECASE)
@@ -104,12 +107,11 @@ def qualify_case(case: dict[str, Any], ifc_path: str | Path, defaults: dict[str,
         result.validate_seconds = time.perf_counter() - started
         result.validation_stats = dict(report.stats)
         result.issues = [asdict(issue) for issue in report.issues]
-
-        result.counts = _model_counts(model, report.stats)
+        result.counts = _model_counts(model, report.stats, report.issues)
 
         result.stage = "route"
         started = time.perf_counter()
-        result.routing = _route_metrics(model, case)
+        result.routing = _route_metrics(model)
         result.route_seconds = time.perf_counter() - started
 
         result.stage = "expectations"
@@ -144,9 +146,7 @@ def evaluate_expectations(case: dict[str, Any], result: CorpusCaseResult) -> lis
         return failures
 
     if result.schema_expected and result.schema_actual:
-        normalized_expected = _normalize_schema(result.schema_expected)
-        normalized_actual = _normalize_schema(result.schema_actual)
-        if normalized_expected != normalized_actual:
+        if _normalize_schema(result.schema_expected) != _normalize_schema(result.schema_actual):
             failures.append(f"schema {result.schema_actual} != expected {result.schema_expected}")
 
     expect = case.get("expect", {})
@@ -202,7 +202,7 @@ def classify_result(result: CorpusCaseResult) -> list[str]:
     return sorted(categories)
 
 
-def _model_counts(model, stats: dict[str, Any]) -> dict[str, int | float | bool]:
+def _model_counts(model, stats: dict[str, Any], issues) -> dict[str, int | float | bool]:
     transition_kinds = [transition.kind for transition in model.transitions]
     return {
         "levels": len(model.levels),
@@ -220,13 +220,13 @@ def _model_counts(model, stats: dict[str, Any]) -> dict[str, int | float | bool]
         "surfaced_spaces": int(stats.get("surface_space_count", 0)),
         "reachable_spaces": int(stats.get("surface_exit_reachable_spaces", 0)),
         "missing_portal_sides": int(stats.get("surface_portal_side_failures", 0)),
-        "unauthorized_crossings": sum(issue.code == "SURFACE_UNAUTHORIZED_SPACE_CROSSING" for issue in validate_model(model).issues),
+        "unauthorized_crossings": sum(issue.code == "SURFACE_UNAUTHORIZED_SPACE_CROSSING" for issue in issues),
         "vertical_component_count": int(stats.get("surface_semantic_component_count", 0)),
         "navigation_ready": bool(stats.get("surface_navigation_ready", False)),
     }
 
 
-def _route_metrics(model, case: dict[str, Any]) -> dict[str, Any]:
+def _route_metrics(model) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "representative_route_attempted": False,
         "representative_route_exists": False,
@@ -243,7 +243,7 @@ def _route_metrics(model, case: dict[str, Any]) -> dict[str, Any]:
         if len(cells) < 2:
             continue
         centroids = [_centroid(cell) for cell in cells]
-        start, goal = _farthest_pair(centroids)
+        start, goal = _approximate_diameter_pair(centroids)
         direct = math.dist(start, goal)
         if direct <= 1e-6:
             continue
@@ -295,16 +295,13 @@ def _centroid(cell) -> tuple[float, float, float]:
     )
 
 
-def _farthest_pair(points: list[tuple[float, float, float]]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    best = (points[0], points[-1])
-    best_distance = -1.0
-    for index, left in enumerate(points):
-        for right in points[index + 1:]:
-            distance = math.dist(left, right)
-            if distance > best_distance:
-                best_distance = distance
-                best = (left, right)
-    return best
+def _approximate_diameter_pair(points: list[tuple[float, float, float]]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    # Two linear farthest-point sweeps avoid an O(n^2) corpus benchmark on
+    # large spaces while still choosing a useful long representative route.
+    seed = points[0]
+    first = max(points, key=lambda point: math.dist(seed, point))
+    second = max(points, key=lambda point: math.dist(first, point))
+    return first, second
 
 
 def _triangle_area_xy(vertices) -> float:
@@ -312,11 +309,13 @@ def _triangle_area_xy(vertices) -> float:
     return abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) * 0.5
 
 
-def _peak_memory_mb() -> float:
+def _peak_memory_mb() -> float | None:
+    if resource is None:
+        return None
     usage = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     # Linux reports KiB; macOS reports bytes.
-    return usage / (1024.0 * 1024.0) if usage > 10_000_000 else usage / 1024.0
+    return usage / (1024.0 * 1024.0) if sys.platform == "darwin" else usage / 1024.0
 
 
 def _normalize_schema(value: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", value.upper()).replace("IFC4X3ADD2", "IFC4X3ADD2")
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
