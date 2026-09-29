@@ -17,8 +17,8 @@ class RouteProfile:
     """Routing policy applied above the canonical INAV topology.
 
     Profiles intentionally describe policy, not geometry. They never mutate the
-    source INAV model; instead they expose a filtered view of semantic
-    transitions. Project-specific accessibility or operational requirements can
+    source INAV model; instead they expose a filtered semantic/metric view for
+    one request. Project-specific accessibility or operational requirements can
     construct custom profiles without changing the generator.
     """
 
@@ -40,19 +40,21 @@ _BUILTIN_PROFILES: tuple[RouteProfile, ...] = (
         id="accessible",
         label="Accessible / step-free",
         description=(
-            "Excludes stairs and escalators. Ramps and elevators remain eligible. "
-            "No universal door-width threshold is assumed automatically."
+            "Excludes stairs, escalators and ambiguous vertical connectors. Ramps and "
+            "qualified elevators remain eligible. No universal door-width threshold "
+            "is assumed automatically."
         ),
-        blocked_transition_kinds=frozenset({"stair", "escalator"}),
+        blocked_transition_kinds=frozenset({"stair", "escalator", "vertical"}),
     ),
     RouteProfile(
         id="emergency_responder",
         label="Emergency responder",
         description=(
-            "Conservative emergency default that excludes elevators while keeping "
-            "stairs, ramps and normal portals eligible. Project policy can override it."
+            "Conservative emergency default that excludes elevators and ambiguous "
+            "vertical connectors while keeping qualified stairs, ramps and normal "
+            "portals eligible. Project policy can override it."
         ),
-        blocked_transition_kinds=frozenset({"elevator"}),
+        blocked_transition_kinds=frozenset({"elevator", "vertical"}),
     ),
     RouteProfile(
         id="security",
@@ -104,33 +106,67 @@ def model_for_route_profile(
     model: InavModel,
     profile: RouteProfile | str | None,
 ) -> InavModel:
-    """Return a non-mutating semantic-policy view of ``model``.
+    """Return a non-mutating policy view of ``model``.
 
-    The metric geometry, cells, nodes and portals are shared with the source
-    model. Only the transition list is copied and filtered. This keeps scenario
-    state and exported INAV canonical while allowing different users or
-    simulations to apply different routing policy.
+    ``find_hierarchical_path`` deliberately regenerates missing semantic
+    transitions from portals and vertical metric components. Therefore a profile
+    must filter both the materialized transition and the source view that could
+    regenerate it. The returned model copies only the affected lists; canonical
+    INAV objects remain untouched.
     """
     resolved = resolve_route_profile(profile)
-    profiled = replace(model, transitions=list(model.transitions))
+    profiled = replace(
+        model,
+        portals=list(model.portals),
+        transitions=list(model.transitions),
+        nodes=list(model.nodes),
+        edges=list(model.edges),
+    )
     ensure_semantic_transitions(profiled)
     portals = {portal.id: portal for portal in profiled.portals}
 
+    rejected_portal_ids: set[str] = set()
     transitions = []
     for transition in profiled.transitions:
-        if transition.kind.lower() in resolved.blocked_transition_kinds:
-            continue
+        kind = transition.kind.lower()
+        rejected = kind in resolved.blocked_transition_kinds
+
         if transition.portal_id and resolved.min_portal_width_m is not None:
             portal = portals.get(transition.portal_id)
             if portal is not None:
                 if portal.width_m is None:
-                    if resolved.require_known_portal_width:
-                        continue
+                    rejected = rejected or resolved.require_known_portal_width
                 elif portal.width_m + 1e-9 < resolved.min_portal_width_m:
-                    continue
+                    rejected = True
+
+        if rejected:
+            if transition.portal_id:
+                rejected_portal_ids.add(transition.portal_id)
+            continue
         transitions.append(transition)
 
+    blocked_node_ids = {
+        node.id
+        for node in profiled.nodes
+        if node.kind.lower() in resolved.blocked_transition_kinds
+    }
+
+    profiled.portals = [
+        portal for portal in profiled.portals if portal.id not in rejected_portal_ids
+    ]
     profiled.transitions = transitions
+    profiled.nodes = [
+        node
+        for node in profiled.nodes
+        if node.id not in blocked_node_ids and node.portal_id not in rejected_portal_ids
+    ]
+    profiled.edges = [
+        edge
+        for edge in profiled.edges
+        if edge.a not in blocked_node_ids
+        and edge.b not in blocked_node_ids
+        and edge.portal_id not in rejected_portal_ids
+    ]
     return profiled
 
 
