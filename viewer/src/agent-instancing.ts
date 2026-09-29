@@ -49,7 +49,7 @@ export class InstancedAgentRenderer {
       Math.max(0, midBudget),
     );
 
-    const material = () => new THREE.MeshStandardMaterial({ roughness: 0.9 });
+    const material = () => new THREE.MeshStandardMaterial({ roughness: 0.9, vertexColors: true });
     this.near = new THREE.InstancedMesh(
       new THREE.CapsuleGeometry(0.20, 0.90, 3, 6),
       material(),
