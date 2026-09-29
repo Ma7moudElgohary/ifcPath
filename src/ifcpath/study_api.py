@@ -101,6 +101,9 @@ def _resolve_viewer_dir(value: str | Path | None) -> Path | None:
     if env_value:
         candidates.append(Path(env_value))
     candidates.extend([
+        # Release wheels contain the prebuilt That Open app here. Keeping this
+        # first means installed users do not need the source tree or Node.js.
+        Path(__file__).resolve().parent / "web_dist",
         Path.cwd() / "viewer" / "dist",
         Path(__file__).resolve().parents[2] / "viewer" / "dist",
     ])
@@ -116,7 +119,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--reload", action="store_true")
-    parser.add_argument("--viewer-dir", help="Built Vite viewer directory (defaults to viewer/dist when present)")
+    parser.add_argument("--viewer-dir", help="Built viewer directory; packaged assets are discovered automatically")
     parser.add_argument("--open", action="store_true", dest="open_browser", help="Open the local viewer in the default browser")
     args = parser.parse_args()
     try:

@@ -1,0 +1,124 @@
+name: local-app-release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/ifcpath/app_runner.py'
+      - 'src/ifcpath/study_api.py'
+      - 'scripts/build_local_app.py'
+      - 'scripts/ifcpath_app_entry.py'
+      - 'scripts/install_local_app.ps1'
+      - 'viewer/**'
+      - 'pyproject.toml'
+      - '.github/workflows/local-app-release.yml'
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows-bundle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build That Open viewer
+        shell: pwsh
+        run: |
+          Set-Location viewer
+          npm install
+          npm run build
+          Set-Location ..
+          Remove-Item -Recurse -Force src/ifcpath/web_dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force src/ifcpath/web_dist | Out-Null
+          Copy-Item viewer/dist/* src/ifcpath/web_dist/ -Recurse -Force
+          if (-not (Test-Path src/ifcpath/web_dist/index.html)) { throw 'viewer index.html was not packaged' }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build pyinstaller
+          pip install -e ".[study]"
+
+      - name: Build wheel with embedded viewer
+        run: python -m build --wheel
+
+      - name: Verify wheel contains viewer
+        shell: python
+        run: |
+          from pathlib import Path
+          import zipfile
+          wheels = list(Path('dist').glob('ifcpath-*.whl'))
+          assert len(wheels) == 1, wheels
+          with zipfile.ZipFile(wheels[0]) as archive:
+              names = set(archive.namelist())
+              assert 'ifcpath/web_dist/index.html' in names
+              assert any(name.startswith('ifcpath/web_dist/assets/') for name in names)
+          print('wheel viewer assets verified:', wheels[0])
+
+      - name: Build standalone Windows app
+        run: python scripts/build_local_app.py
+
+      - name: Smoke-test standalone server and viewer
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path 'dist/IFCPathApp/IFCPathApp.exe'
+          $process = Start-Process $exe -ArgumentList '--no-open','--port','8766' -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $health = Invoke-RestMethod 'http://127.0.0.1:8766/health' -TimeoutSec 2
+                if ($health.status -eq 'ok' -and $health.viewer_available) { $ready = $true; break }
+              } catch {}
+            }
+            if (-not $ready) { throw 'standalone IfcPath server did not become ready' }
+            $viewer = Invoke-WebRequest 'http://127.0.0.1:8766/' -UseBasicParsing -TimeoutSec 5
+            if ($viewer.StatusCode -ne 200 -or $viewer.Content -notmatch 'IfcPath Viewer') { throw 'standalone viewer smoke test failed' }
+          } finally {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Assemble release archives
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release/python-bundle/dist | Out-Null
+          Copy-Item dist/ifcpath-*.whl release/python-bundle/dist/
+          Copy-Item scripts/install_local_app.ps1 release/python-bundle/
+          Copy-Item docs/LOCAL_APP.md release/python-bundle/README.md
+          Compress-Archive -Path release/python-bundle/* -DestinationPath release/IfcPath-Windows-Python-Bundle.zip -Force
+          Compress-Archive -Path dist/IFCPathApp/* -DestinationPath release/IfcPath-Windows-Portable.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ifcpath-local-app-windows
+          path: |
+            release/IfcPath-Windows-Portable.zip
+            release/IfcPath-Windows-Python-Bundle.zip
+            dist/ifcpath-*.whl
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            release/IfcPath-Windows-Portable.zip `
+            release/IfcPath-Windows-Python-Bundle.zip `
+            (Get-ChildItem dist/ifcpath-*.whl | Select-Object -First 1).FullName `
+            --generate-notes `
+            --title "IfcPath $env:GITHUB_REF_NAME"
