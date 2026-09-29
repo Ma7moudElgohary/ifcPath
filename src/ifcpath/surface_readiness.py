@@ -30,6 +30,10 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
     intentionally off-mesh resources, so routability is decided by the semantic
     space graph layered over qualified surface spaces, while doors/stairs/ramps
     still have to be backed by valid NavCell topology.
+
+    IFC spaces explicitly marked exterior remain valid geometry/topology but are
+    not occupant egress domains. Their lack of an indoor exit route therefore
+    does not make an otherwise qualified building unroutable.
     """
     if not model.cells:
         return SurfaceReadiness(
@@ -108,7 +112,19 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
 
     open_cells = [cell for cell in model.cells if cell.terrain == "open"]
     surface_spaces = {cell.space_id for cell in open_cells if cell.space_id}
+    space_by_id = {space.id: space for space in model.spaces}
+    external_surface_spaces = {
+        space_id
+        for space_id in surface_spaces
+        if space_by_id.get(space_id) is not None and space_by_id[space_id].is_external
+    }
+    required_surface_spaces = surface_spaces - external_surface_spaces
     surface_levels = {cell.level_id for cell in open_cells if cell.level_id}
+    required_surface_levels = {
+        cell.level_id
+        for cell in open_cells
+        if cell.level_id and cell.space_id in required_surface_spaces
+    }
     unowned_open_cells = sum(cell.space_id is None for cell in open_cells)
 
     split_surface_spaces = 0
@@ -169,7 +185,6 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
             continue
         semantic_undirected[a].add(b)
         semantic_undirected[b].add(a)
-        # Reverse graph: if a -> b then a can reach anything reachable from b.
         reverse_reachability[b].add(a)
         if transition.bidirectional:
             reverse_reachability[a].add(b)
@@ -194,11 +209,14 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
     reachable_exit_spaces: set[str] = set()
     if exit_spaces:
         reachable_exit_spaces = _reachable_from(exit_spaces, reverse_reachability)
-    unreachable_exit_spaces = surface_spaces - reachable_exit_spaces if exit_spaces else set()
+    required_reachable_spaces = reachable_exit_spaces & required_surface_spaces
+    unreachable_required_spaces = (
+        required_surface_spaces - reachable_exit_spaces if exit_spaces else set()
+    )
     surface_exit_reachable_ratio = (
-        len(reachable_exit_spaces) / len(surface_spaces)
-        if surface_spaces and exit_spaces
-        else (1.0 if not surface_spaces else 0.0)
+        len(required_reachable_spaces) / len(required_surface_spaces)
+        if required_surface_spaces and exit_spaces
+        else (1.0 if not required_surface_spaces else 0.0)
     )
 
     exits = [portal for portal in model.portals if portal.is_exit]
@@ -208,29 +226,36 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
             "SURFACE_EXIT_UNBOUND",
             "Classified exits are not attached to any surfaced navigation space",
         ))
-    elif unreachable_exit_spaces:
+    elif unreachable_required_spaces:
         issues.append(SurfaceReadinessIssue(
             "warning",
             "SURFACE_SPACES_CANNOT_REACH_EXIT",
-            f"{len(unreachable_exit_spaces)} surfaced space(s) cannot reach a classified exit",
+            f"{len(unreachable_required_spaces)} internal surfaced space(s) cannot reach a classified exit",
         ))
 
-    multi_level_surface = len(surface_levels) > 1
+    multi_level_surface = len(required_surface_levels) > 1
     cross_level_ready = (not multi_level_surface) or cross_level_transitions > 0
     if multi_level_surface and not cross_level_ready:
         issues.append(SurfaceReadinessIssue(
             "warning",
             "SURFACE_NO_CROSS_LEVEL_TRANSITION",
-            "Multiple surfaced levels exist but no semantic cross-level transition connects them",
+            "Multiple internal surfaced levels exist but no semantic cross-level transition connects them",
         ))
 
-    if surface_spaces:
+    if required_surface_spaces:
         if exits:
-            connectivity_ready = bool(exit_spaces) and not unreachable_exit_spaces
+            connectivity_ready = bool(exit_spaces) and not unreachable_required_spaces
         else:
-            connectivity_ready = semantic_component_count <= 1
+            required_components = _components({
+                space_id: {
+                    neighbor for neighbor in semantic_undirected.get(space_id, ())
+                    if neighbor in required_surface_spaces
+                }
+                for space_id in required_surface_spaces
+            })
+            connectivity_ready = len(required_components) <= 1
     else:
-        connectivity_ready = component_count == 1
+        connectivity_ready = True
 
     surface_errors = sum(issue.severity == "error" for issue in issues)
     ready = (
@@ -256,7 +281,10 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
             "surface_largest_component_cells": largest_component_cells,
             "surface_reachable_ratio": surface_reachable_ratio,
             "surface_space_count": len(surface_spaces),
+            "surface_internal_space_count": len(required_surface_spaces),
+            "surface_external_space_count": len(external_surface_spaces),
             "surface_level_count": len(surface_levels),
+            "surface_internal_level_count": len(required_surface_levels),
             "surface_semantic_component_count": semantic_component_count,
             "surface_split_spaces": split_surface_spaces,
             "surface_portal_crossings": sum(len(pairs) for pairs in semantic_crossings.values()),
@@ -265,8 +293,8 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
             "surface_vertical_transfer_failures": surface_vertical_transfer_failures,
             "surface_cross_level_transitions": cross_level_transitions,
             "surface_exit_spaces": len(exit_spaces),
-            "surface_exit_reachable_spaces": len(reachable_exit_spaces),
-            "surface_exit_unreachable_spaces": len(unreachable_exit_spaces),
+            "surface_exit_reachable_spaces": len(required_reachable_spaces),
+            "surface_exit_unreachable_spaces": len(unreachable_required_spaces),
             "surface_exit_reachable_ratio": surface_exit_reachable_ratio,
             "surface_topology_errors": topology_errors,
             "surface_asymmetric_edges": asymmetric_edges,
