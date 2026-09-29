@@ -1,0 +1,9 @@
+{
+  "name": "ifcpath-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {"dev":"vite","build":"tsc && vite build","preview":"vite preview"},
+  "dependencies": {"@thatopen/components":"latest","@thatopen/fragments":"latest","three":"latest"},
+  "devDependencies": {"typescript":"latest","vite":"latest","@types/three":"latest"}
+}
