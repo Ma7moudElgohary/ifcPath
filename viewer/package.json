@@ -4,21 +4,23 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview"
+    "sync:wasm": "node scripts/copy-web-ifc-wasm.mjs",
+    "dev": "npm run sync:wasm && vite",
+    "build": "npm run sync:wasm && tsc && vite build",
+    "preview": "vite preview",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@thatopen/components": "latest",
-    "@thatopen/fragments": "latest",
-    "three": "latest",
-    "@thatopen/components-front": "latest",
-    "@thatopen/ui": "latest",
-    "web-ifc": "latest"
+    "@thatopen/components": "3.4.8",
+    "@thatopen/fragments": "3.4.7",
+    "camera-controls": "3.1.2",
+    "three": "0.184.0",
+    "web-ifc": "0.0.77"
   },
   "devDependencies": {
+    "@playwright/test": "latest",
     "typescript": "latest",
-    "vite": "latest",
-    "@types/three": "latest"
+    "vite": "8.3.1",
+    "@types/three": "0.184.0"
   }
 }

@@ -14,7 +14,7 @@ from .study_service import StudyRequestError, run_study
 
 def create_app(viewer_dir: str | Path | None = None):
     try:
-        from fastapi import FastAPI, HTTPException, Request
+        from fastapi import Body, FastAPI, Header, HTTPException
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover - optional runtime dependency
@@ -63,10 +63,12 @@ def create_app(viewer_dir: str | Path | None = None):
         }
 
     @app.post("/inav/build")
-    async def build_inav(request: Request) -> dict[str, Any]:
+    async def build_inav(
+        body: bytes = Body(..., media_type="application/octet-stream"),
+        x_ifc_filename: str = Header(default="upload.ifc"),
+    ) -> dict[str, Any]:
         try:
-            filename = request.headers.get("x-ifc-filename", "upload.ifc")
-            return build_inav_payload(await request.body(), filename)
+            return build_inav_payload(body, x_ifc_filename)
         except IfcBuildRequestError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

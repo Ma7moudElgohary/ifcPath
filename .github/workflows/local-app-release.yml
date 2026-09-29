@@ -94,6 +94,50 @@ jobs:
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Install Chromium for browser qualification
+        shell: pwsh
+        run: |
+          Set-Location viewer
+          npx playwright install chromium
+
+      - name: Qualify real IFC through Chromium and standalone app
+        shell: pwsh
+        run: |
+          $ifc = Join-Path $env:RUNNER_TEMP 'Duplex_A_20110907.ifc'
+          Invoke-WebRequest `
+            'https://raw.githubusercontent.com/andyward/XBimDemo/master/Xbim.TestApp/Duplex_A_20110907.ifc' `
+            -OutFile $ifc
+          $exe = Resolve-Path 'dist/IFCPathApp/IFCPathApp.exe'
+          $process = Start-Process $exe -ArgumentList '--no-open','--port','8767' -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $health = Invoke-RestMethod 'http://127.0.0.1:8767/health' -TimeoutSec 2
+                if ($health.status -eq 'ok' -and $health.viewer_available) { $ready = $true; break }
+              } catch {}
+            }
+            if (-not $ready) { throw 'standalone IfcPath server did not become ready for browser qualification' }
+            $env:IFCPATH_E2E_URL = 'http://127.0.0.1:8767'
+            $env:IFCPATH_E2E_IFC = $ifc
+            Set-Location viewer
+            npm run test:e2e
+            Set-Location ..
+          } finally {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload browser diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ifcpath-browser-e2e-diagnostics
+          if-no-files-found: ignore
+          path: |
+            viewer/playwright-report
+            viewer/test-results
+
       - name: Assemble release archives
         shell: pwsh
         run: |

@@ -1,3 +1,5 @@
+export {};
+
 type BuildResponse = {
   model: Record<string, unknown>;
   qualification?: {
@@ -20,12 +22,17 @@ async function attachAutoBuild() {
   const ifcInput = await waitFor<HTMLInputElement>("#ifc");
   const inavInput = await waitFor<HTMLInputElement>("#inav");
   const status = await waitFor<HTMLElement>("#status");
+  const root = document.documentElement;
 
   ifcInput.addEventListener("change", async () => {
     const file = ifcInput.files?.[0];
     if (!file) return;
     const apiInput = document.querySelector<HTMLInputElement>("#study-api");
     const apiBase = (apiInput?.value || window.location.origin).replace(/\/$/, "");
+    root.dataset.inavBuild = "building";
+    delete root.dataset.inavCells;
+    delete root.dataset.inavReady;
+    delete root.dataset.inavError;
     status.textContent = "Building continuous navigation surface from IFC…";
 
     try {
@@ -40,8 +47,8 @@ async function attachAutoBuild() {
       if (!response.ok) {
         let detail = `${response.status} ${response.statusText}`;
         try {
-          const error = await response.json() as { detail?: string };
-          if (error.detail) detail = error.detail;
+          const payload = await response.json() as { detail?: unknown };
+          if (payload.detail !== undefined) detail = formatDetail(payload.detail);
         } catch {
           // Keep HTTP status text when the server did not return JSON.
         }
@@ -64,13 +71,33 @@ async function attachAutoBuild() {
       transfer.items.add(generated);
       inavInput.files = transfer.files;
       inavInput.dispatchEvent(new Event("change", { bubbles: true }));
+
+      root.dataset.inavCells = String(cells);
+      root.dataset.inavReady = String(ready === true);
+      root.dataset.inavBuild = "ready";
+      root.dispatchEvent(new CustomEvent("ifcpath:inav-ready", { detail: { cells, ready: ready === true } }));
       status.textContent = `IFC navigation built automatically · ${cells} cells${ready === true ? " · ready" : ""}`;
     } catch (error) {
       // Manual .inav loading remains available if the API is not running.
-      const message = error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : formatDetail(error);
+      root.dataset.inavBuild = "error";
+      root.dataset.inavReady = "false";
+      root.dataset.inavError = message;
       status.textContent = `IFC loaded visually; automatic INAV build unavailable (${message}). You can still load an INAV manually.`;
     }
   });
+
+  root.dataset.autoInav = "ready";
+  root.dispatchEvent(new CustomEvent("ifcpath:auto-inav-ready"));
+}
+
+function formatDetail(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 async function waitFor<T extends Element>(selector: string): Promise<T> {
