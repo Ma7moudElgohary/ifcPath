@@ -59,7 +59,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         centroid = ((bbox[0] + bbox[3]) * 0.5, (bbox[1] + bbox[4]) * 0.5, (bbox[2] + bbox[5]) * 0.5)
         space = Space(
             id=f"space:{entity.GlobalId}",
-            name=entity.Name or getattr(entity, "LongName", None) or entity.GlobalId,
+            name=entity.Name or _safe_ifc_attr(entity, "LongName") or entity.GlobalId,
             level_id=level_id,
             centroid_m=centroid,
             ifc_guid=entity.GlobalId,
@@ -164,7 +164,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
     if not floor_space_ids:
         floor_entities = [
             e for e in model.by_type("IfcSlab")
-            if str(getattr(e, "PredefinedType", "")).upper() not in {"ROOF"}
+            if str(_safe_ifc_attr(e, "PredefinedType", "")).upper() not in {"ROOF"}
         ]
         for entity in floor_entities:
             mesh = _mesh(entity)
@@ -207,7 +207,7 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             vertical_cells = walkable_surface_cells(
                 mesh[0],
                 mesh[1],
-                id_prefix=f"cell:{kind}:{getattr(entity, 'GlobalId', entity.id())}",
+                id_prefix=f"cell:{kind}:{_safe_ifc_attr(entity, 'GlobalId', entity.id())}",
                 terrain=kind,
                 max_slope_deg=options.max_slope_deg,
                 level_id=vertical_level_id,
@@ -301,8 +301,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
         p = ((bbox[0] + bbox[3]) * 0.5, (bbox[1] + bbox[4]) * 0.5, bbox[2])
 
         related_element_ids = {door.id()}
-        for fills_rel in getattr(door, "FillsVoids", ()) or ():
-            opening = getattr(fills_rel, "RelatingOpeningElement", None)
+        for fills_rel in _safe_ifc_attr(door, "FillsVoids", ()) or ():
+            opening = _safe_ifc_attr(fills_rel, "RelatingOpeningElement")
             if opening is not None:
                 related_element_ids.add(opening.id())
 
@@ -327,7 +327,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
 
         from_space = connected_spaces[0].id if connected_spaces else None
         to_space = connected_spaces[1].id if len(connected_spaces) > 1 else None
-        portal_id = f"door:{door.GlobalId}"
+        door_guid = _safe_ifc_attr(door, "GlobalId", str(door.id()))
+        portal_id = f"door:{door_guid}"
         level_id = level_by_entity.get(door.id()) or (
             connected_spaces[0].level_id if connected_spaces else None
         )
@@ -339,13 +340,13 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             from_space_id=from_space,
             to_space_id=to_space,
             level_id=level_id,
-            width_m=float(getattr(door, "OverallWidth", 0.0) or 0.0) or None,
-            ifc_guid=door.GlobalId,
+            width_m=float(_safe_ifc_attr(door, "OverallWidth", 0.0) or 0.0) or None,
+            ifc_guid=door_guid,
             is_exit=_door_is_exit(door, related_element_ids, external_boundary_elements, len(connected_spaces)),
         )
         out.portals.append(portal)
 
-        node_id = f"p:{door.GlobalId}"
+        node_id = f"p:{door_guid}"
         out.nodes.append(NavNode(
             id=node_id,
             position_m=p,
@@ -491,8 +492,8 @@ def _spatial_level_id(entity, level_by_entity: dict[int, str | None], level_by_g
         if direct:
             return direct
 
-        for rel in getattr(current, "ContainedInStructure", ()) or ():
-            parent = getattr(rel, "RelatingStructure", None)
+        for rel in _safe_ifc_attr(current, "ContainedInStructure", ()) or ():
+            parent = _safe_ifc_attr(rel, "RelatingStructure")
             if parent is None:
                 continue
             try:
@@ -502,8 +503,8 @@ def _spatial_level_id(entity, level_by_entity: dict[int, str | None], level_by_g
                 pass
             queue.append(parent)
 
-        for rel in getattr(current, "Decomposes", ()) or ():
-            parent = getattr(rel, "RelatingObject", None)
+        for rel in _safe_ifc_attr(current, "Decomposes", ()) or ():
+            parent = _safe_ifc_attr(rel, "RelatingObject")
             if parent is None:
                 continue
             try:
@@ -524,8 +525,8 @@ def _boundary_space_info(model, space_by_entity_id: dict[int, Space]) -> tuple[d
         except Exception:
             continue
         for rel in relations:
-            space_entity = getattr(rel, "RelatingSpace", None)
-            element = getattr(rel, "RelatedBuildingElement", None)
+            space_entity = _safe_ifc_attr(rel, "RelatingSpace")
+            element = _safe_ifc_attr(rel, "RelatedBuildingElement")
             if space_entity is None or element is None:
                 continue
             space = space_by_entity_id.get(space_entity.id())
@@ -534,7 +535,7 @@ def _boundary_space_info(model, space_by_entity_id: dict[int, Space]) -> tuple[d
             bucket = result.setdefault(element.id(), [])
             if all(existing.id != space.id for existing in bucket):
                 bucket.append(space)
-            boundary_kind = str(getattr(rel, "InternalOrExternalBoundary", "") or "").upper()
+            boundary_kind = str(_safe_ifc_attr(rel, "InternalOrExternalBoundary", "") or "").upper()
             if boundary_kind == "EXTERNAL":
                 external_elements.add(element.id())
     return result, external_elements
@@ -552,34 +553,51 @@ def _door_is_exit(door, related_element_ids: set[int], external_boundary_element
 
 def _door_external_property(door) -> bool | None:
     """Read Pset_DoorCommon.IsExternal when authored on occurrence or type."""
-    relationships = list(getattr(door, "IsDefinedBy", ()) or ())
-    for typed_by in getattr(door, "IsTypedBy", ()) or ():
-        relating_type = getattr(typed_by, "RelatingType", None)
-        relationships.extend(getattr(relating_type, "HasPropertySets", ()) or ())
+    relationships = list(_safe_ifc_attr(door, "IsDefinedBy", ()) or ())
+    for typed_by in _safe_ifc_attr(door, "IsTypedBy", ()) or ():
+        relating_type = _safe_ifc_attr(typed_by, "RelatingType")
+        relationships.extend(_safe_ifc_attr(relating_type, "HasPropertySets", ()) or ())
 
     property_sets = []
     for relation in relationships:
-        pset = getattr(relation, "RelatingPropertyDefinition", relation)
-        if getattr(pset, "Name", None) == "Pset_DoorCommon":
+        pset = _safe_ifc_attr(relation, "RelatingPropertyDefinition", relation)
+        if _safe_ifc_attr(pset, "Name") == "Pset_DoorCommon":
             property_sets.append(pset)
 
     for pset in property_sets:
-        for prop in getattr(pset, "HasProperties", ()) or ():
-            if getattr(prop, "Name", None) != "IsExternal":
+        for prop in _safe_ifc_attr(pset, "HasProperties", ()) or ():
+            if _safe_ifc_attr(prop, "Name") != "IsExternal":
                 continue
-            nominal = getattr(prop, "NominalValue", None)
-            value = getattr(nominal, "wrappedValue", nominal)
+            nominal = _safe_ifc_attr(prop, "NominalValue")
+            value = _safe_ifc_attr(nominal, "wrappedValue", nominal)
             if isinstance(value, bool):
                 return value
     return None
 
 
+def _safe_ifc_attr(entity, name: str, default=None):
+    """Read an IFC attribute without trusting schema metadata to match instance width.
+
+    Some real-world IFCs are accepted by IfcOpenShell even when an entity has a
+    shorter STEP argument vector than the loaded schema declares. In that case
+    normal ``getattr`` resolves the schema slot and then raises RuntimeError or
+    IndexError while reading it. Treat that slot as missing so semantic fallbacks
+    can proceed instead of aborting the complete IFC import.
+    """
+    if entity is None:
+        return default
+    try:
+        return getattr(entity, name, default)
+    except (RuntimeError, IndexError):
+        return default
+
+
 def _space_is_external(entity) -> bool:
     """Read standard IFC space interior/exterior classification across schema versions."""
-    boundary = str(getattr(entity, "InteriorOrExteriorSpace", "") or "").upper()
+    boundary = str(_safe_ifc_attr(entity, "InteriorOrExteriorSpace", "") or "").upper()
     if boundary:
         return boundary == "EXTERNAL"
-    predefined = str(getattr(entity, "PredefinedType", "") or "").upper()
+    predefined = str(_safe_ifc_attr(entity, "PredefinedType", "") or "").upper()
     return predefined == "EXTERNAL"
 
 
@@ -653,8 +671,8 @@ def _vertical_walk_entities(model, assembly_type: str, flight_type: str):
 
     for assembly in assemblies:
         has_flight_child = False
-        for relation in getattr(assembly, "IsDecomposedBy", ()) or ():
-            for child in getattr(relation, "RelatedObjects", ()) or ():
+        for relation in _safe_ifc_attr(assembly, "IsDecomposedBy", ()) or ():
+            for child in _safe_ifc_attr(relation, "RelatedObjects", ()) or ():
                 try:
                     if child.is_a(flight_type):
                         has_flight_child = True
