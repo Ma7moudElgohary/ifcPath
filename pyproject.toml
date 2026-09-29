@@ -16,9 +16,20 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 desktop = ["PySide6>=6.8,<7"]
+gpu = [
+  "wgpu==0.31.1; python_version >= '3.11'",
+  "rendercanvas>=2.7,<3; python_version >= '3.11'",
+]
+desktop-gpu = [
+  "PySide6>=6.8,<7",
+  "wgpu==0.31.1; python_version >= '3.11'",
+  "rendercanvas>=2.7,<3; python_version >= '3.11'",
+]
 microscopic = ["jupedsim==1.4.2"]
 desktop-build = [
   "PySide6>=6.8,<7",
+  "wgpu==0.31.1; python_version >= '3.11'",
+  "rendercanvas>=2.7,<3; python_version >= '3.11'",
   "pyinstaller>=6.11",
 ]
 
