@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ifcpath.ifc_loader import _spatial_level_id
+from ifcpath.ifc_loader import _spatial_level_id, _vertical_point_level_id
+from ifcpath.model import Level
 
 
 @dataclass
@@ -52,3 +53,15 @@ def test_decomposition_cycles_do_not_loop() -> None:
     b.Decomposes = [_Rel(RelatingObject=a)]
 
     assert _spatial_level_id(b, {}, {}) is None
+
+
+def test_vertical_samples_cross_into_next_storey_by_elevation():
+    levels = [
+        Level("L1", "Ground", 0.0),
+        Level("L2", "First", 3.0),
+        Level("L3", "Second", 6.0),
+    ]
+    assert _vertical_point_level_id((0.0, 0.0, 0.2), levels, containing_level_id="L1") == "L1"
+    assert _vertical_point_level_id((0.0, 0.0, 2.9), levels, containing_level_id="L1") == "L1"
+    assert _vertical_point_level_id((0.0, 0.0, 3.0), levels, containing_level_id="L1") == "L2"
+    assert _vertical_point_level_id((0.0, 0.0, 3.4), levels, containing_level_id="L1") == "L2"
