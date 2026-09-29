@@ -22,13 +22,13 @@ async function attachAutoBuild() {
   const ifcInput = await waitFor<HTMLInputElement>("#ifc");
   const inavInput = await waitFor<HTMLInputElement>("#inav");
   const status = await waitFor<HTMLElement>("#status");
+  const root = document.documentElement;
 
   ifcInput.addEventListener("change", async () => {
     const file = ifcInput.files?.[0];
     if (!file) return;
     const apiInput = document.querySelector<HTMLInputElement>("#study-api");
     const apiBase = (apiInput?.value || window.location.origin).replace(/\/$/, "");
-    const root = document.documentElement;
     root.dataset.inavBuild = "building";
     delete root.dataset.inavCells;
     delete root.dataset.inavReady;
@@ -86,6 +86,9 @@ async function attachAutoBuild() {
       status.textContent = `IFC loaded visually; automatic INAV build unavailable (${message}). You can still load an INAV manually.`;
     }
   });
+
+  root.dataset.autoInav = "ready";
+  root.dispatchEvent(new CustomEvent("ifcpath:auto-inav-ready"));
 }
 
 function formatDetail(value: unknown): string {
