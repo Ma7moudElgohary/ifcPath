@@ -9,8 +9,17 @@ export type NavCell = {
   space_id?: string | null;
   level_id?: string | null;
   portals?: Record<string, [Vec3, Vec3]>;
+  portal_ids?: Record<string, string>;
 };
-export type InavModel = { cells?: NavCell[] };
+export type InavPortal = {
+  id: string;
+  kind: string;
+  position_m: Vec3;
+  from_space_id?: string | null;
+  to_space_id?: string | null;
+  is_exit?: boolean;
+};
+export type InavModel = { cells?: NavCell[]; portals?: InavPortal[]; metadata?: Record<string, unknown> };
 export type SurfacePick = { cellId: string; point: Vec3 };
 
 const TERRAIN_COST: Record<string, number> = { open: 1, ramp: 1.1, stair: 1.25 };
@@ -28,7 +37,10 @@ export class InavScene {
   private routeGroup = new THREE.Group();
   private mesh?: THREE.Mesh;
   private cells: NavCell[] = [];
+  private model: InavModel = {};
   private byId = new Map<string, NavCell>();
+  private blockedPortalIds = new Set<string>();
+  private boundsBox = new THREE.Box3();
 
   constructor(private scene: THREE.Scene) {
     this.group.name = "IfcPath navigation surface";
@@ -39,8 +51,11 @@ export class InavScene {
   load(model: InavModel) {
     this.group.clear();
     this.clearRoute();
+    this.model = model;
     this.cells = model.cells ?? [];
     this.byId = new Map(this.cells.map((cell) => [cell.id, cell]));
+    this.blockedPortalIds.clear();
+    this.boundsBox.makeEmpty();
 
     const positions: number[] = [];
     const colors: number[] = [];
@@ -50,6 +65,7 @@ export class InavScene {
         const p = toThree(vertex);
         positions.push(p.x, p.y, p.z);
         colors.push(color.r, color.g, color.b);
+        this.boundsBox.expandByPoint(p);
       }
     }
 
@@ -78,6 +94,22 @@ export class InavScene {
     );
     wire.raycast = () => undefined;
     this.group.add(wire);
+  }
+
+  setVisible(visible: boolean) {
+    this.group.visible = visible;
+  }
+
+  bounds() {
+    return this.boundsBox.clone();
+  }
+
+  portalIds() {
+    return (this.model.portals ?? []).filter((p) => p.kind === "door").map((p) => p.id);
+  }
+
+  setBlockedPortalIds(ids: Iterable<string>) {
+    this.blockedPortalIds = new Set([...ids].filter(Boolean));
   }
 
   pick(clientX: number, clientY: number, canvas: HTMLElement, camera: THREE.Camera): SurfacePick | null {
@@ -109,11 +141,20 @@ export class InavScene {
     return simplifyPolyline(points);
   }
 
+  routeLength(route: Vec3[]) {
+    let total = 0;
+    for (let i = 0; i + 1 < route.length; i++) total += distance(route[i], route[i + 1]);
+    return total;
+  }
+
   drawRoute(route: Vec3[], start?: Vec3, goal?: Vec3) {
     this.clearRoute();
     if (route.length >= 2) {
       const geometry = new THREE.BufferGeometry().setFromPoints(route.map(toThree));
-      this.routeGroup.add(new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xff2255 })));
+      const material = new THREE.LineBasicMaterial({ color: 0xff2255, depthTest: false });
+      const line = new THREE.Line(geometry, material);
+      line.renderOrder = 30;
+      this.routeGroup.add(line);
     }
     if (start) this.routeGroup.add(this.marker(start, 0x00cc66));
     if (goal) this.routeGroup.add(this.marker(goal, 0xff3344));
@@ -136,7 +177,7 @@ export class InavScene {
       new THREE.MeshBasicMaterial({ color, depthTest: false }),
     );
     mesh.position.copy(toThree(point));
-    mesh.renderOrder = 20;
+    mesh.renderOrder = 40;
     return mesh;
   }
 
@@ -156,6 +197,8 @@ export class InavScene {
       for (const neighborId of current.neighbor_ids ?? []) {
         const neighbor = this.byId.get(neighborId);
         if (!neighbor) continue;
+        const portalId = current.portal_ids?.[neighborId] ?? neighbor.portal_ids?.[currentId];
+        if (portalId && this.blockedPortalIds.has(portalId)) continue;
         const np = centroid(neighbor);
         const terrainCost = TERRAIN_COST[neighbor.terrain ?? "open"] ?? 1;
         const candidate = (g.get(currentId) ?? Infinity) + distance(cp, np) * terrainCost;
