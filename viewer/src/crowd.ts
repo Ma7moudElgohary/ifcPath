@@ -24,6 +24,8 @@ export class CrowdLayer {
   private simple: SimpleAgent[] = [];
   private humanTemplate?: THREE.Group;
   private humanAnimations: THREE.AnimationClip[] = [];
+  private paused = false;
+  private speedMultiplier = 1;
   private readonly maxAnimatedHumans = 64;
   private readonly simpleCapacity = 2000;
   private readonly simpleMesh: THREE.InstancedMesh;
@@ -56,6 +58,14 @@ export class CrowdLayer {
     } finally {
       URL.revokeObjectURL(url);
     }
+  }
+
+  setPaused(paused: boolean) {
+    this.paused = paused;
+  }
+
+  setSpeedMultiplier(value: number) {
+    this.speedMultiplier = Math.max(0.1, Math.min(5, value || 1));
   }
 
   clear() {
@@ -102,12 +112,14 @@ export class CrowdLayer {
   }
 
   update(dt: number) {
+    if (this.paused) return;
+    const scaledDt = dt * this.speedMultiplier;
     for (const agent of this.detailed) {
-      agent.mixer?.update(dt);
-      this.advance(agent.object.position, agent.route, agent, dt);
+      agent.mixer?.update(scaledDt);
+      this.advance(agent.object.position, agent.route, agent, scaledDt);
       this.faceNext(agent.object, agent.route, agent.segment);
     }
-    for (const agent of this.simple) this.advance(agent.position, agent.route, agent, dt);
+    for (const agent of this.simple) this.advance(agent.position, agent.route, agent, scaledDt);
     this.flushInstances();
   }
 
@@ -159,7 +171,9 @@ export class CrowdLayer {
       const next = agent.route[Math.min(agent.segment + 1, agent.route.length - 1)] ?? agent.position;
       const direction = next.clone().sub(agent.position).setY(0);
       const rotation = new THREE.Quaternion();
-      if (direction.lengthSq() > 1e-6) rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(direction.x, direction.z));
+      if (direction.lengthSq() > 1e-6) {
+        rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(direction.x, direction.z));
+      }
       this.matrix.compose(agent.position, rotation, new THREE.Vector3(1, 1, 1));
       this.simpleMesh.setMatrixAt(i, this.matrix);
     }
