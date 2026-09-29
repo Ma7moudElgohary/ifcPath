@@ -9,13 +9,6 @@ on:
       - 'scripts/**'
       - 'pyproject.toml'
       - '.github/workflows/real-ifc.yml'
-  pull_request:
-    paths:
-      - 'src/ifcpath/**'
-      - 'tests/**'
-      - 'scripts/**'
-      - 'pyproject.toml'
-      - '.github/workflows/real-ifc.yml'
 
 jobs:
   duplex-reference:
