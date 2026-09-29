@@ -173,15 +173,8 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             )
             points.extend(sampled)
             point_kinds.extend(["walk"] * len(sampled))
-            containing_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
-            point_levels.extend([
-                _vertical_point_level_id(
-                    p,
-                    levels,
-                    containing_level_id=containing_level_id,
-                )
-                for p in sampled
-            ])
+            slab_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
+            point_levels.extend([slab_level_id] * len(sampled))
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
             point_cell_ids.extend([None] * len(sampled))
 
@@ -202,8 +195,15 @@ def build_from_ifc(path: str | Path, options: BuildOptions | None = None) -> Ina
             sampled = sample_walkable_triangles(mesh[0], mesh[1], spacing, options.max_slope_deg)
             points.extend(sampled)
             point_kinds.extend([kind] * len(sampled))
-            vertical_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
-            point_levels.extend([vertical_level_id] * len(sampled))
+            containing_level_id = _spatial_level_id(entity, level_by_entity, level_by_guid)
+            point_levels.extend([
+                _vertical_point_level_id(
+                    p,
+                    levels,
+                    containing_level_id=containing_level_id,
+                )
+                for p in sampled
+            ])
             point_spaces.extend([_space_at_point(p, space_boxes) for p in sampled])
             point_cell_ids.extend([None] * len(sampled))
 
