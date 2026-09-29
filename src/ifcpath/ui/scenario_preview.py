@@ -25,6 +25,9 @@ class Scenario3DPreview(Projected3DPreview):
         self._agent_position: Vec3 | None = None
         self._agent_forward: tuple[float, float] = (0.0, 1.0)
 
+    def _live_interaction_quality(self) -> bool:
+        return self._navigation_is_active() or self._pan_last is not None
+
     def set_scenario(
         self,
         *,
@@ -37,11 +40,11 @@ class Scenario3DPreview(Projected3DPreview):
         self._blocked_spaces = set(blocked_spaces or ())
         self._space_cost_multipliers = dict(space_cost_multipliers or {})
         self._hazard_kinds = dict(hazard_kinds or {})
-        self.redraw(fit=False)
+        self.redraw(fit=False, interactive=self._live_interaction_quality())
 
     def set_person_visible(self, visible: bool) -> None:
         self._show_person = bool(visible)
-        self.redraw(fit=False)
+        self.redraw(fit=False, interactive=self._live_interaction_quality())
 
     def set_agent_pose(
         self,
@@ -51,7 +54,7 @@ class Scenario3DPreview(Projected3DPreview):
         self._agent_position = position
         if forward is not None:
             self._agent_forward = forward
-        self.redraw(fit=False)
+        self.redraw(fit=False, interactive=self._live_interaction_quality())
 
     @property
     def blocked_portals(self) -> set[str]:
