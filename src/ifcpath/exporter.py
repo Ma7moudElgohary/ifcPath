@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .egress_domains import classify_egress_domains
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, SemanticTransition, Space
 from .open_space_adjacency import connect_open_space_boundaries
 from .portal_recovery import qualify_surface_portal_sides
@@ -37,6 +38,11 @@ def _ensure_portable_semantics(model: InavModel) -> None:
     ensure_surface_vertical_transitions(model)
     ensure_semantic_transitions(model)
     bind_semantic_surface_portals(model)
+
+    # Egress readiness is an occupant-domain question, not a statement that
+    # service/roof geometry is unnavigable. Classify after all semantic access
+    # has been recovered so an authored roof terrace/penthouse remains required.
+    classify_egress_domains(model)
 
 
 def save_inav(model: InavModel, path: str | Path) -> Path:
