@@ -13,6 +13,8 @@ test("real IFC renders and builds a ready INAV in the browser", async ({ page })
   await expect(page.locator("#ifc")).toBeVisible();
   await expect(page.locator("#study-health")).toBeVisible();
 
+  // Auto-INAV reads this field at the moment the IFC input changes.
+  await page.locator("#study-api").fill(baseUrl);
   await page.locator("#ifc").setInputFiles(path.resolve(ifcPath!));
 
   const html = page.locator("html");
@@ -24,7 +26,6 @@ test("real IFC renders and builds a ready INAV in the browser", async ({ page })
   expect(cellCount).toBeGreaterThan(50);
   await expect(page.locator("#door-count")).toContainText("door portal");
 
-  await page.locator("#study-api").fill(baseUrl);
   await page.locator("#study-health").click();
   await expect(page.locator("#study-status")).toContainText("Server ready");
 
