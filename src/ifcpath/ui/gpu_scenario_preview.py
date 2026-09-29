@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from array import array
-from typing import Any
 
 import wgpu
 
@@ -17,8 +16,9 @@ class GpuScenarioPreview(GpuBimPreview):
 
     BIM/navmesh batches remain resident. Route, portal/graph/endpoint markers,
     hazards, blocked portals, the walking agent and evacuation occupants use
-    separate small dynamic buffers, so simulation updates never rebuild static
-    IFC geometry.
+    separate grow-on-demand dynamic buffers. Once capacity is sufficient, a
+    simulation tick only writes new bytes; it does not allocate GPU resources or
+    rebuild static IFC geometry.
     """
 
     def __init__(self, parent=None) -> None:
@@ -32,8 +32,10 @@ class GpuScenarioPreview(GpuBimPreview):
         self._agent_forward: tuple[float, float] = (0.0, 1.0)
         self._evacuation_poses: dict[str, tuple[Vec3, tuple[float, float], str]] = {}
         self._overlay_triangle_buffer = None
+        self._overlay_triangle_capacity = 0
         self._overlay_triangle_count = 0
         self._overlay_line_buffer = None
+        self._overlay_line_capacity = 0
         self._overlay_line_count = 0
         self._person_triangle_count = 0
         self._refresh_overlay_buffers()
@@ -135,9 +137,7 @@ class GpuScenarioPreview(GpuBimPreview):
 
     def _refresh_overlay_buffers(self) -> None:
         scene = self._scene_data
-        self._overlay_triangle_buffer = None
         self._overlay_triangle_count = 0
-        self._overlay_line_buffer = None
         self._overlay_line_count = 0
         self._person_triangle_count = 0
         if scene is None:
@@ -168,23 +168,45 @@ class GpuScenarioPreview(GpuBimPreview):
         )
         overlay.extend(scenario)
 
-        if overlay.triangle_vertex_count:
-            self._overlay_triangle_buffer = self._device.create_buffer_with_data(
-                data=overlay.triangle_vertices,
-                usage=wgpu.BufferUsage.VERTEX,
-            )
-            self._overlay_triangle_count = overlay.triangle_vertex_count
-        if overlay.line_vertex_count:
-            self._overlay_line_buffer = self._device.create_buffer_with_data(
-                data=overlay.line_vertices,
-                usage=wgpu.BufferUsage.VERTEX,
-            )
-            self._overlay_line_count = overlay.line_vertex_count
+        (
+            self._overlay_triangle_buffer,
+            self._overlay_triangle_capacity,
+        ) = self._write_dynamic_buffer(
+            self._overlay_triangle_buffer,
+            self._overlay_triangle_capacity,
+            overlay.triangle_vertices,
+        )
+        self._overlay_triangle_count = overlay.triangle_vertex_count
+        (
+            self._overlay_line_buffer,
+            self._overlay_line_capacity,
+        ) = self._write_dynamic_buffer(
+            self._overlay_line_buffer,
+            self._overlay_line_capacity,
+            overlay.line_vertices,
+        )
+        self._overlay_line_count = overlay.line_vertex_count
 
         if self._show_person and self._agent_position is not None:
             self._person_triangle_count = len(
                 build_person_mesh(self._agent_position, self._agent_forward, height_m=1.72)
             )
+
+    def _write_dynamic_buffer(self, buffer, capacity: int, data: array):
+        required = len(data) * data.itemsize
+        if required <= 0:
+            return buffer, capacity
+        if buffer is None or capacity < required:
+            new_capacity = 256
+            while new_capacity < required:
+                new_capacity *= 2
+            buffer = self._device.create_buffer(
+                size=new_capacity,
+                usage=wgpu.BufferUsage.VERTEX | wgpu.BufferUsage.COPY_DST,
+            )
+            capacity = new_capacity
+        self._device.queue.write_buffer(buffer, 0, data)
+        return buffer, capacity
 
     # ---------- draw static batches + small dynamic overlays in one frame ----------
 
