@@ -5,15 +5,20 @@ from pathlib import Path
 
 from .model import InavModel, Level, NavCell, NavEdge, NavNode, Portal, SemanticTransition, Space
 from .open_space_adjacency import connect_open_space_boundaries
+from .portal_recovery import qualify_surface_portal_sides
 from .semantic import ensure_semantic_transitions
 from .surface_portals import bind_semantic_surface_portals
 from .vertical_surface import ensure_surface_vertical_transitions
 
 
 def _ensure_portable_semantics(model: InavModel) -> None:
-    # First recover only exact/coincident open-plan space boundaries. Wider
-    # geometric gaps require loader-side wall qualification and are deliberately
-    # not inferred here from portable data alone.
+    # Repair stale/ambiguous IFC door-side semantics against the authoritative
+    # floor surface before deriving any topology from those portals.
+    qualify_surface_portal_sides(model)
+
+    # Recover only exact/coincident open-plan space boundaries. Wider geometric
+    # gaps require loader-side wall qualification and are deliberately not
+    # inferred here from portable data alone.
     open_stats = connect_open_space_boundaries(
         model,
         [],
