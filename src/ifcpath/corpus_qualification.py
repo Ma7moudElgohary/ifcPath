@@ -4,11 +4,13 @@ import hashlib
 import math
 import re
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .exporter import save_inav
 from .hierarchical_routing import find_hierarchical_path
 from .ifc_loader import BuildOptions, build_from_ifc
 from .surface_funnel import find_surface_funnel_route
@@ -94,11 +96,17 @@ def qualify_case(case: dict[str, Any], ifc_path: str | Path, defaults: dict[str,
         result.stage = "schema"
         result.schema_actual = read_ifc_schema(path)
 
+        # Qualification must use the same portable-semantic preparation as the
+        # CLI/browser IFC->INAV path. save_inav() repairs door sides, recovers
+        # conservative open boundaries, derives surface vertical transitions,
+        # binds surface portals and classifies egress domains before validation.
         result.stage = "build"
         options = dict(defaults.get("build_options", {}))
         options.update(case.get("build_options", {}))
         started = time.perf_counter()
         model = build_from_ifc(path, BuildOptions(**options))
+        with tempfile.TemporaryDirectory(prefix="ifcpath-case-") as temp_name:
+            save_inav(model, Path(temp_name) / "qualified.inav")
         result.build_seconds = time.perf_counter() - started
 
         result.stage = "validate"
