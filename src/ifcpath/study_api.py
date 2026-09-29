@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+from .microscopic_motion import MicroscopicBackendUnavailable
 from .study_service import StudyRequestError, run_study
 
 
@@ -57,7 +58,7 @@ def create_app():
             return run_study(payload)
         except StudyRequestError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except ImportError as exc:
+        except (MicroscopicBackendUnavailable, ImportError) as exc:
             raise HTTPException(
                 status_code=503,
                 detail=(
