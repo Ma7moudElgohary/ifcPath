@@ -73,9 +73,9 @@ class Scenario3DPreview(Projected3DPreview):
         super()._draw_navmesh(model)
         outline = QPen(QColor(255, 109, 95, 220), 0.0)
         outline.setCosmetic(True)
-        for cell in model.cells:
-            if self._level_id and cell.level_id != self._level_id:
-                continue
+        # Reuse the base viewport's interaction LOD. Otherwise live hazard
+        # overlays could redraw every navmesh cell while an orbit is in progress.
+        for cell in self._cells_for_render():
             space_id = cell.space_id
             if not space_id:
                 continue
@@ -108,10 +108,8 @@ class Scenario3DPreview(Projected3DPreview):
         radius = max(0.12, self._marker_radius(model) * 1.75)
         pen = QPen(QColor("#ff4f5e"), 0.0)
         pen.setCosmetic(True)
-        for portal in model.portals:
+        for portal in self._portals_for_render():
             if portal.id not in self._blocked_portals:
-                continue
-            if self._level_id and portal.level_id and portal.level_id != self._level_id:
                 continue
             point, depth = self._project(portal.position_m)
             for x1, y1, x2, y2 in (
