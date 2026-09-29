@@ -21,6 +21,10 @@ class Space:
     centroid_m: Vec3 | None = None
     ifc_guid: str | None = None
     is_external: bool = False
+    # Whether this space must participate in occupant-egress readiness. Service
+    # domains such as roof/plenum/void spaces remain routable for maintenance,
+    # but do not make an otherwise qualified occupant model fail readiness.
+    egress_required: bool = True
 
 
 @dataclass(slots=True)
