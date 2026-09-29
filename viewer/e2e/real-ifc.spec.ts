@@ -13,6 +13,10 @@ test("real IFC renders and builds a ready INAV in the browser", async ({ page })
   await expect(page.locator("#ifc")).toBeVisible();
   await expect(page.locator("#study-health")).toBeVisible();
 
+  const html = page.locator("html");
+  await expect(html).toHaveAttribute("data-auto-inav", "ready", { timeout: 15_000 });
+  await expect(html).toHaveAttribute("data-viewer-health", "ready", { timeout: 15_000 });
+
   // Auto-INAV reads this field at the moment the IFC input changes.
   await page.locator("#study-api").fill(baseUrl);
   await page.locator("#ifc").setInputFiles(path.resolve(ifcPath!));
@@ -20,7 +24,6 @@ test("real IFC renders and builds a ready INAV in the browser", async ({ page })
   await waitForTerminalState(page, "inavBuild", 210_000);
   await waitForTerminalState(page, "ifcViewer", 210_000);
 
-  const html = page.locator("html");
   expect(await html.getAttribute("data-inav-build"), await html.getAttribute("data-inav-error") ?? "INAV build failed").toBe("ready");
   expect(await html.getAttribute("data-ifc-viewer"), await html.getAttribute("data-ifc-viewer-error") ?? "IFC viewer failed").toBe("ready");
   await expect(html).toHaveAttribute("data-inav-ready", "true");
