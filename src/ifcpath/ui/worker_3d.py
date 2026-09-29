@@ -23,11 +23,13 @@ class Builder3DWorker(QObject):
         operation: str,
         path: str,
         options: BuildOptions | None = None,
+        preview_max_triangles: int = 18_000,
     ) -> None:
         super().__init__()
         self.operation = operation
         self.path = path
         self.options = options
+        self.preview_max_triangles = max(1, int(preview_max_triangles))
 
     @Slot()
     def run(self) -> None:
@@ -35,7 +37,10 @@ class Builder3DWorker(QObject):
             preview_geometry = None
             if self.operation == "build":
                 model = build_from_ifc(Path(self.path), self.options or BuildOptions())
-                preview_geometry = extract_preview_geometry(Path(self.path))
+                preview_geometry = extract_preview_geometry(
+                    Path(self.path),
+                    max_triangles=self.preview_max_triangles,
+                )
             elif self.operation == "load":
                 model = load_inav(Path(self.path))
             else:
