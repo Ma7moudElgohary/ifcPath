@@ -35,11 +35,15 @@ jobs:
           cat /tmp/qualification.json
           python scripts/assert_reference_qualification.py /tmp/qualification.json
           python scripts/assert_navmesh_export.py /tmp/Duplex_A_20110907.inav
+          python scripts/assert_route_benchmark.py \\
+            /tmp/Duplex_A_20110907.inav \\
+            /tmp/route_benchmark.json
       - name: Run real-building crowd evacuation qualification
         run: |
           python scripts/assert_evacuation_qualification.py \
             /tmp/Duplex_A_20110907.inav \
             /tmp/evacuation_qualification.json
+            /tmp/route_benchmark.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
