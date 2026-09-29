@@ -28,6 +28,7 @@ const TERRAIN_COLOR: Record<string, THREE.Color> = {
   ramp: new THREE.Color(0x3388dd),
   stair: new THREE.Color(0xf09a35),
 };
+const EPSILON = 1e-9;
 
 export const toThree = ([x, y, z]: Vec3) => new THREE.Vector3(x, z, -y);
 export const fromThree = (p: THREE.Vector3): Vec3 => [p.x, -p.z, p.y];
@@ -131,14 +132,16 @@ export class InavScene {
   route(start: SurfacePick, goal: SurfacePick): Vec3[] {
     const corridor = this.findCorridor(start.cellId, goal.cellId);
     if (!corridor.length) return [];
-    const points: Vec3[] = [start.point];
+    if (corridor.length === 1) return [start.point, goal.point];
+
+    const portals: Array<[Vec3, Vec3]> = [[start.point, start.point]];
     for (let i = 0; i + 1 < corridor.length; i++) {
-      const a = this.byId.get(corridor[i])!;
-      const b = this.byId.get(corridor[i + 1])!;
-      points.push(this.portalMidpoint(a, b));
+      const current = this.byId.get(corridor[i])!;
+      const next = this.byId.get(corridor[i + 1])!;
+      portals.push(orientedPortal(current, next, portalSegment(current, next)));
     }
-    points.push(goal.point);
-    return simplifyPolyline(points);
+    portals.push([goal.point, goal.point]);
+    return stringPull(portals);
   }
 
   routeLength(route: Vec3[]) {
@@ -219,34 +222,107 @@ export class InavScene {
     corridor.reverse();
     return corridor;
   }
-
-  private portalMidpoint(a: NavCell, b: NavCell): Vec3 {
-    const portal = a.portals?.[b.id] ?? b.portals?.[a.id];
-    if (portal) return midpoint(portal[0], portal[1]);
-    return midpoint(centroid(a), centroid(b));
-  }
 }
 
 function centroid(cell: NavCell): Vec3 {
   const [a, b, c] = cell.vertices_m;
   return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
 }
-function midpoint(a: Vec3, b: Vec3): Vec3 {
-  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
-}
+
 function distance(a: Vec3, b: Vec3) {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 }
-function simplifyPolyline(points: Vec3[]): Vec3[] {
-  if (points.length <= 2) return points;
-  const result = [points[0]];
-  for (let i = 1; i + 1 < points.length; i++) {
-    const a = result[result.length - 1], b = points[i], c = points[i + 1];
-    const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    const bc = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
-    const cross = [ab[1] * bc[2] - ab[2] * bc[1], ab[2] * bc[0] - ab[0] * bc[2], ab[0] * bc[1] - ab[1] * bc[0]];
-    if (Math.hypot(cross[0], cross[1], cross[2]) > 1e-5) result.push(b);
+
+function portalSegment(a: NavCell, b: NavCell): [Vec3, Vec3] {
+  const stored = a.portals?.[b.id] ?? b.portals?.[a.id];
+  if (stored) return stored;
+
+  const common = a.vertices_m.filter((pa) => b.vertices_m.some((pb) => distance(pa, pb) <= 1e-4));
+  if (common.length >= 2) return [common[0], common[1]];
+
+  const ca = centroid(a), cb = centroid(b);
+  const midpoint: Vec3 = [(ca[0] + cb[0]) / 2, (ca[1] + cb[1]) / 2, (ca[2] + cb[2]) / 2];
+  return [midpoint, midpoint];
+}
+
+function orientedPortal(current: NavCell, next: NavCell, [a, b]: [Vec3, Vec3]): [Vec3, Vec3] {
+  const currentCenter = centroid(current);
+  const nextCenter = centroid(next);
+  const dx = nextCenter[0] - currentCenter[0];
+  const dy = nextCenter[1] - currentCenter[1];
+  const mx = (a[0] + b[0]) * 0.5;
+  const my = (a[1] + b[1]) * 0.5;
+  const crossA = dx * (a[1] - my) - dy * (a[0] - mx);
+  const crossB = dx * (b[1] - my) - dy * (b[0] - mx);
+  return crossA >= crossB ? [b, a] : [a, b];
+}
+
+function stringPull(portals: Array<[Vec3, Vec3]>): Vec3[] {
+  if (!portals.length) return [];
+
+  const path: Vec3[] = [portals[0][0]];
+  let apex = portals[0][0];
+  let left = portals[0][0];
+  let right = portals[0][1];
+  let apexIndex = 0;
+  let leftIndex = 0;
+  let rightIndex = 0;
+  let i = 1;
+
+  while (i < portals.length) {
+    const [newLeft, newRight] = portals[i];
+
+    if (triArea2(apex, right, newRight) <= EPSILON) {
+      if (vecEqual(apex, right) || triArea2(apex, left, newRight) > EPSILON) {
+        right = newRight;
+        rightIndex = i;
+      } else {
+        path.push(left);
+        apex = left;
+        apexIndex = leftIndex;
+        left = apex;
+        right = apex;
+        leftIndex = apexIndex;
+        rightIndex = apexIndex;
+        i = apexIndex + 1;
+        continue;
+      }
+    }
+
+    if (triArea2(apex, left, newLeft) >= -EPSILON) {
+      if (vecEqual(apex, left) || triArea2(apex, right, newLeft) < -EPSILON) {
+        left = newLeft;
+        leftIndex = i;
+      } else {
+        path.push(right);
+        apex = right;
+        apexIndex = rightIndex;
+        left = apex;
+        right = apex;
+        leftIndex = apexIndex;
+        rightIndex = apexIndex;
+        i = apexIndex + 1;
+        continue;
+      }
+    }
+    i += 1;
   }
-  result.push(points[points.length - 1]);
+
+  const goal = portals[portals.length - 1][0];
+  if (!vecEqual(path[path.length - 1], goal)) path.push(goal);
+  return removeConsecutiveDuplicates(path);
+}
+
+function triArea2(a: Vec3, b: Vec3, c: Vec3) {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+function vecEqual(a: Vec3, b: Vec3) {
+  return Math.hypot(a[0] - b[0], a[1] - b[1]) <= EPSILON;
+}
+
+function removeConsecutiveDuplicates(points: Vec3[]) {
+  const result: Vec3[] = [];
+  for (const point of points) if (!result.length || !vecEqual(result[result.length - 1], point)) result.push(point);
   return result;
 }
