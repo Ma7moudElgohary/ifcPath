@@ -13,16 +13,21 @@ def create_preview(kind: PreviewKind, parent=None) -> QWidget:
 
     ``IFCPATH_VIEWPORT=gpu`` selects the new WebGPU backend. Any import, adapter,
     surface or device failure falls back to the established Qt projection.
-    Until scenario/evacuation overlay parity is complete, ``auto`` intentionally
-    resolves to Qt; this keeps existing packaged behavior deterministic.
+    Until full GPU overlay parity is complete, ``auto`` intentionally resolves
+    to Qt; this keeps existing packaged behavior deterministic.
     """
 
     preference = os.environ.get("IFCPATH_VIEWPORT", "qt").strip().lower()
     if preference in {"gpu", "webgpu", "wgpu"}:
         try:
-            from .gpu_preview import GpuBimPreview
+            if kind in {"scenario", "evacuation"}:
+                from .gpu_scenario_preview import GpuScenarioPreview
 
-            preview = GpuBimPreview(parent)
+                preview = GpuScenarioPreview(parent)
+            else:
+                from .gpu_preview import GpuBimPreview
+
+                preview = GpuBimPreview(parent)
             setattr(preview, "gpu_requested", True)
             return preview
         except Exception as exc:
