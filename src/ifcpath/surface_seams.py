@@ -21,16 +21,21 @@ def stitch_clearance_aware_seams(
 ) -> int:
     """Stitch independent support meshes using the widest valid edge crossing.
 
-    For each unconnected cell pair every boundary-edge combination is evaluated.
-    This is important for stairs: a corner contact may be geometrically valid but
-    a parallel tread/landing overlap is the useful crossing. The widest valid
-    portal wins, and parallel overlaps are trimmed by body clearance so the
+    For each unconnected cell pair every relevant boundary-edge combination is
+    evaluated. This is important for stairs: a corner contact may be geometrically
+    valid but a parallel tread/landing overlap is the useful crossing. The widest
+    valid portal wins, and parallel overlaps are trimmed by body clearance so the
     funnel cannot be anchored at a railing endpoint.
 
     ``vertical_only`` is used by the physical IFC reconstruction pipeline. Once a
     unified multi-layer floor field exists, a missing flat/open sample is evidence
     of an obstacle or insufficient clearance and must *not* be healed by proximity.
     Only stair/ramp/escalator boundaries may bridge a sampling/model tolerance gap.
+
+    In that mode candidate enumeration starts only from vertical boundary edges.
+    This preserves the exact same geometric candidates while reducing the common
+    case from all-boundary O(B²) comparisons to O(V*B), where V is the much smaller
+    number of stair/ramp/escalator boundary edges.
     """
     if not cells:
         return 0
@@ -63,44 +68,63 @@ def stitch_clearance_aware_seams(
         tuple[float, float, NavCell, NavCell, tuple[Vec3, Vec3]],
     ] = {}
 
-    for index, (aid, a0, a1) in enumerate(boundaries):
-        for bid, b0, b1 in boundaries[index + 1 :]:
-            pair = tuple(sorted((aid, bid)))
-            if aid == bid or pair in connected:
-                continue
-            a, b = by_id[aid], by_id[bid]
-            if vertical_only and not (
-                a.terrain in _VERTICAL_TERRAINS or b.terrain in _VERTICAL_TERRAINS
-            ):
-                continue
-            if (
-                a.terrain == b.terrain == "open"
-                and a.space_id
-                and b.space_id
-                and a.space_id != b.space_id
-            ):
-                # Cross-space floor travel must still be authorised by a semantic
-                # door/open boundary later; geometry alone cannot create it.
-                continue
+    if vertical_only:
+        vertical_indices = [
+            index
+            for index, (cell_id, _, _) in enumerate(boundaries)
+            if by_id[cell_id].terrain in _VERTICAL_TERRAINS
+        ]
+        vertical_index_set = set(vertical_indices)
+        candidate_pairs = (
+            (index, other_index)
+            for index in vertical_indices
+            for other_index in range(len(boundaries))
+            if index != other_index
+            # A vertical/vertical edge pair would otherwise be visited twice.
+            and not (other_index in vertical_index_set and other_index < index)
+        )
+    else:
+        candidate_pairs = (
+            (index, other_index)
+            for index in range(len(boundaries))
+            for other_index in range(index + 1, len(boundaries))
+        )
 
-            candidate = _overlap_portal(
-                a0,
-                a1,
-                b0,
-                b1,
-                max_gap_m=max_gap_m,
-                max_vertical_gap_m=max_vertical_gap_m,
-                edge_clearance_m=edge_clearance_m,
-                parallel_tolerance_deg=parallel_tolerance_deg,
-            )
-            if candidate is None:
-                continue
-            portal, separation = candidate
-            width = math.dist(portal[0], portal[1])
-            ranking = (width, -separation)
-            previous = best.get(pair)
-            if previous is None or ranking > previous[:2]:
-                best[pair] = (width, -separation, a, b, portal)
+    for index, other_index in candidate_pairs:
+        aid, a0, a1 = boundaries[index]
+        bid, b0, b1 = boundaries[other_index]
+        pair = tuple(sorted((aid, bid)))
+        if aid == bid or pair in connected:
+            continue
+        a, b = by_id[aid], by_id[bid]
+        if (
+            a.terrain == b.terrain == "open"
+            and a.space_id
+            and b.space_id
+            and a.space_id != b.space_id
+        ):
+            # Cross-space floor travel must still be authorised by a semantic
+            # door/open boundary later; geometry alone cannot create it.
+            continue
+
+        candidate = _overlap_portal(
+            a0,
+            a1,
+            b0,
+            b1,
+            max_gap_m=max_gap_m,
+            max_vertical_gap_m=max_vertical_gap_m,
+            edge_clearance_m=edge_clearance_m,
+            parallel_tolerance_deg=parallel_tolerance_deg,
+        )
+        if candidate is None:
+            continue
+        portal, separation = candidate
+        width = math.dist(portal[0], portal[1])
+        ranking = (width, -separation)
+        previous = best.get(pair)
+        if previous is None or ranking > previous[:2]:
+            best[pair] = (width, -separation, a, b, portal)
 
     added = 0
     for pair in sorted(best):
