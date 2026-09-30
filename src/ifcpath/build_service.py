@@ -73,6 +73,9 @@ def build_inav_payload(
             raw_model.metadata["surface_fragment_pruning"] = {
                 "removed_cells": fragment_stats.removed_cells,
                 "removed_components": fragment_stats.removed_components,
+                "protected_vertical_components": fragment_stats.protected_vertical_components,
+                "protected_bound_portal_components": fragment_stats.protected_bound_portal_components,
+                "protected_portal_proximity_components": fragment_stats.protected_portal_proximity_components,
             }
             raw_model.metadata["cell_count"] = len(raw_model.cells)
         else:
@@ -98,6 +101,9 @@ def build_inav_payload(
             model.metadata["surface_postbind_fragment_pruning"] = {
                 "removed_cells": post_stats.removed_cells,
                 "removed_components": post_stats.removed_components,
+                "protected_vertical_components": post_stats.protected_vertical_components,
+                "protected_bound_portal_components": post_stats.protected_bound_portal_components,
+                "protected_portal_proximity_components": post_stats.protected_portal_proximity_components,
             }
             model.metadata["cell_count"] = len(model.cells)
             if post_stats.removed_cells:
