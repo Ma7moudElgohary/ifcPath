@@ -4,12 +4,13 @@ on:
   pull_request:
     branches: [main]
     paths: &release_paths
-      - 'src/ifcpath/app_runner.py'
-      - 'src/ifcpath/study_api.py'
+      - 'src/ifcpath/**'
       - 'scripts/build_local_app.py'
       - 'scripts/ifcpath_app_entry.py'
       - 'scripts/install_local_app.ps1'
+      - 'scripts/assert_local_app_build.py'
       - 'viewer/**'
+      - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/local-app-release.yml'
   workflow_dispatch:
