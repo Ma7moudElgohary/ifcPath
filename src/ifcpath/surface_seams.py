@@ -15,14 +15,13 @@ def stitch_clearance_aware_seams(
     edge_clearance_m: float = 0.18,
     parallel_tolerance_deg: float = 12.0,
 ) -> int:
-    """Stitch independent support meshes using their actual overlapping edge width.
+    """Stitch independent support meshes using the widest valid edge crossing.
 
-    The old seam fallback connected the closest points of two edges and built a
-    tiny portal around that point. Parallel stair-tread edges therefore often
-    selected one endpoint and forced the funnel against a railing. Here, nearly
-    parallel seams are connected across their projected overlap interval, trimmed
-    by body clearance on both sides. Non-parallel contacts retain a conservative
-    closest-point fallback.
+    For each unconnected cell pair every boundary-edge combination is evaluated.
+    This is important for stairs: a corner contact may be geometrically valid but
+    a parallel tread/landing overlap is the useful crossing. The widest valid
+    portal wins, and parallel overlaps are trimmed by body clearance so the
+    funnel cannot be anchored at a railing endpoint.
     """
     if not cells:
         return 0
@@ -50,7 +49,11 @@ def stitch_clearance_aware_seams(
             data.setdefault(edge, (cell.id, start, end))
 
     boundaries = [data[edge] for edge, count in counts.items() if count == 1]
-    added = 0
+    best: dict[
+        tuple[str, str],
+        tuple[float, float, NavCell, NavCell, tuple[Vec3, Vec3]],
+    ] = {}
+
     for index, (aid, a0, a1) in enumerate(boundaries):
         for bid, b0, b1 in boundaries[index + 1 :]:
             pair = tuple(sorted((aid, bid)))
@@ -67,7 +70,7 @@ def stitch_clearance_aware_seams(
                 # door/open boundary later; geometry alone cannot create it.
                 continue
 
-            portal = _overlap_portal(
+            candidate = _overlap_portal(
                 a0,
                 a1,
                 b0,
@@ -77,14 +80,23 @@ def stitch_clearance_aware_seams(
                 edge_clearance_m=edge_clearance_m,
                 parallel_tolerance_deg=parallel_tolerance_deg,
             )
-            if portal is None:
+            if candidate is None:
                 continue
+            portal, separation = candidate
+            width = math.dist(portal[0], portal[1])
+            ranking = (width, -separation)
+            previous = best.get(pair)
+            if previous is None or ranking > previous[:2]:
+                best[pair] = (width, -separation, a, b, portal)
 
-            _connect_pair(a, b)
-            a.portals[b.id] = portal
-            b.portals[a.id] = portal
-            connected.add(pair)
-            added += 1
+    added = 0
+    for pair in sorted(best):
+        _, _, a, b, portal = best[pair]
+        _connect_pair(a, b)
+        a.portals[b.id] = portal
+        b.portals[a.id] = portal
+        connected.add(pair)
+        added += 1
     return added
 
 
@@ -98,7 +110,7 @@ def _overlap_portal(
     max_vertical_gap_m: float,
     edge_clearance_m: float,
     parallel_tolerance_deg: float,
-) -> tuple[Vec3, Vec3] | None:
+) -> tuple[tuple[Vec3, Vec3], float] | None:
     da = _sub(a1, a0)
     db = _sub(b1, b0)
     la_xy = math.hypot(da[0], da[1])
@@ -111,7 +123,7 @@ def _overlap_portal(
             math.radians(parallel_tolerance_deg)
         )
         if parallel:
-            portal = _parallel_overlap_portal(
+            candidate = _parallel_overlap_portal(
                 a0,
                 a1,
                 b0,
@@ -121,15 +133,16 @@ def _overlap_portal(
                 max_vertical_gap_m=max_vertical_gap_m,
                 edge_clearance_m=edge_clearance_m,
             )
-            if portal is not None:
-                return portal
+            if candidate is not None:
+                return candidate
 
     # Corners and genuinely non-parallel seams use a conservative point contact.
     pa, pb = _closest_segment_points(a0, a1, b0, b1)
-    if abs(pa[2] - pb[2]) > max_vertical_gap_m or math.dist(pa, pb) > max_gap_m:
+    separation = math.dist(pa, pb)
+    if abs(pa[2] - pb[2]) > max_vertical_gap_m or separation > max_gap_m:
         return None
     center = _midpoint(pa, pb)
-    return center, center
+    return (center, center), separation
 
 
 def _parallel_overlap_portal(
@@ -142,7 +155,7 @@ def _parallel_overlap_portal(
     max_gap_m: float,
     max_vertical_gap_m: float,
     edge_clearance_m: float,
-) -> tuple[Vec3, Vec3] | None:
+) -> tuple[tuple[Vec3, Vec3], float] | None:
     origin_xy = (a0[0], a0[1])
 
     def parameter(point: Vec3) -> float:
@@ -163,9 +176,10 @@ def _parallel_overlap_portal(
     middle = (low + high) * 0.5
     pa_mid = _point_at_axis_parameter(a0, a1, axis_xy, origin_xy, middle)
     pb_mid = _point_at_axis_parameter(b0, b1, axis_xy, origin_xy, middle)
+    separation = math.dist(pa_mid, pb_mid)
     if (
         abs(pa_mid[2] - pb_mid[2]) > max_vertical_gap_m
-        or math.dist(pa_mid, pb_mid) > max_gap_m
+        or separation > max_gap_m
     ):
         return None
 
@@ -183,7 +197,7 @@ def _parallel_overlap_portal(
     pb0 = _point_at_axis_parameter(b0, b1, axis_xy, origin_xy, low)
     pa1 = _point_at_axis_parameter(a0, a1, axis_xy, origin_xy, high)
     pb1 = _point_at_axis_parameter(b0, b1, axis_xy, origin_xy, high)
-    return _midpoint(pa0, pb0), _midpoint(pa1, pb1)
+    return (_midpoint(pa0, pb0), _midpoint(pa1, pb1)), separation
 
 
 def _point_at_axis_parameter(
