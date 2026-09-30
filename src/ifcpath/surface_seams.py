@@ -7,6 +7,9 @@ from .model import NavCell, Vec3
 from .surface_nav import _connect_pair, _closest_segment_points
 
 
+_VERTICAL_TERRAINS = {"stair", "ramp", "escalator"}
+
+
 def stitch_clearance_aware_seams(
     cells: list[NavCell],
     *,
@@ -14,6 +17,7 @@ def stitch_clearance_aware_seams(
     max_vertical_gap_m: float = 0.30,
     edge_clearance_m: float = 0.18,
     parallel_tolerance_deg: float = 12.0,
+    vertical_only: bool = False,
 ) -> int:
     """Stitch independent support meshes using the widest valid edge crossing.
 
@@ -22,6 +26,11 @@ def stitch_clearance_aware_seams(
     a parallel tread/landing overlap is the useful crossing. The widest valid
     portal wins, and parallel overlaps are trimmed by body clearance so the
     funnel cannot be anchored at a railing endpoint.
+
+    ``vertical_only`` is used by the physical IFC reconstruction pipeline. Once a
+    unified multi-layer floor field exists, a missing flat/open sample is evidence
+    of an obstacle or insufficient clearance and must *not* be healed by proximity.
+    Only stair/ramp/escalator boundaries may bridge a sampling/model tolerance gap.
     """
     if not cells:
         return 0
@@ -60,6 +69,10 @@ def stitch_clearance_aware_seams(
             if aid == bid or pair in connected:
                 continue
             a, b = by_id[aid], by_id[bid]
+            if vertical_only and not (
+                a.terrain in _VERTICAL_TERRAINS or b.terrain in _VERTICAL_TERRAINS
+            ):
+                continue
             if (
                 a.terrain == b.terrain == "open"
                 and a.space_id
