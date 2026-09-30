@@ -3,8 +3,11 @@ from __future__ import annotations
 from ifcpath.raycast_surface import (
     SurfaceDetectionOptions,
     SurfaceSamplingDomain,
+    _SupportCandidate,
     _SupportSample,
+    _group_support_candidates,
     _headroom_blocked,
+    _preferred_support_candidate,
     _samples_compatible,
     _triangulate_samples,
     ifc_walkable_support_role,
@@ -49,6 +52,42 @@ def test_headroom_filter_uses_nearest_distinct_surface_above_support():
     # zero-height ceiling.
     coincident = [(0.0, 0.0, 0.01), (0.0, 0.0, 0.0)]
     assert not _headroom_blocked(1, coincident, 0.0, 1.8)
+
+
+def test_coincident_support_representations_collapse_to_one_physical_layer():
+    candidates = [
+        _SupportCandidate(2, (1.0, 2.0, 0.020), 10, "open"),
+        _SupportCandidate(3, (1.0, 2.0, 0.005), 11, "open"),
+        _SupportCandidate(5, (1.0, 2.0, -0.40), 12, "open"),
+    ]
+
+    layers = _group_support_candidates(candidates, tolerance=0.025)
+
+    assert [len(layer) for layer in layers] == [2, 1]
+    assert {candidate.owner_id for candidate in layers[0]} == {10, 11}
+    assert layers[1][0].owner_id == 12
+
+
+def test_stair_support_wins_terrain_when_coincident_with_open_floor():
+    open_floor = _SupportCandidate(3, (0.0, 0.0, 0.010), 20, "open")
+    stair = _SupportCandidate(4, (0.0, 0.0, 0.000), 21, "stair")
+
+    layers = _group_support_candidates([open_floor, stair], tolerance=0.025)
+
+    assert len(layers) == 1
+    chosen = _preferred_support_candidate(layers[0])
+    assert chosen.owner_id == 21
+    assert chosen.terrain == "stair"
+
+
+def test_separate_vertical_supports_are_not_deduplicated():
+    floor = _SupportCandidate(2, (0.0, 0.0, 0.0), 30, "open")
+    upper_floor = _SupportCandidate(8, (0.0, 0.0, 3.1), 31, "open")
+
+    layers = _group_support_candidates([floor, upper_floor], tolerance=0.025)
+
+    assert len(layers) == 2
+    assert {_preferred_support_candidate(layer).owner_id for layer in layers} == {30, 31}
 
 
 def test_sample_connectivity_accepts_normal_stair_rise_but_rejects_large_jump():
