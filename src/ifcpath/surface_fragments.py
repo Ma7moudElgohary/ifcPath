@@ -95,6 +95,20 @@ def prune_tiny_space_fragments(
 
     if remove_ids:
         cells[:] = [cell for cell in cells if cell.id not in remove_ids]
+        # Keep the portable topology self-contained immediately; callers should
+        # not have to remember to repair references after a geometry-pruning pass.
+        for cell in cells:
+            cell.neighbor_ids[:] = [
+                neighbor_id
+                for neighbor_id in cell.neighbor_ids
+                if neighbor_id not in remove_ids
+            ]
+            for neighbor_id in list(cell.portals):
+                if neighbor_id in remove_ids:
+                    cell.portals.pop(neighbor_id, None)
+            for neighbor_id in list(cell.portal_ids):
+                if neighbor_id in remove_ids:
+                    cell.portal_ids.pop(neighbor_id, None)
 
     return FragmentPruneStats(
         removed_cells=len(remove_ids),
