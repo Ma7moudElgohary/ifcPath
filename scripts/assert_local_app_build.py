@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 from ifcpath.build_service import build_inav_payload
+from ifcpath.exporter import model_from_dict
+from ifcpath.hierarchical_routing import find_hierarchical_path
+from ifcpath.surface_nav import cell_centroid
+from ifcpath.vertical_surface import surface_vertical_components
+
+
+_VERTICAL_KINDS = {"stair", "ramp", "escalator"}
 
 
 def _split_space_components(cells: list[dict]) -> dict[str, list[int]]:
@@ -36,6 +44,103 @@ def _split_space_components(cells: list[dict]) -> dict[str, list[int]]:
         if len(sizes) > 1:
             result[space_id] = sorted(sizes, reverse=True)
     return dict(sorted(result.items()))
+
+
+def _qualify_physical_multilevel_route(raw_model: dict) -> dict | None:
+    """Route between actual surface-vertical landings on the final physical mesh."""
+    model = model_from_dict(raw_model)
+    level_elevation = {level.id: level.elevation_m for level in model.levels}
+    cross_level = [
+        transition
+        for transition in model.transitions
+        if transition.source == "surface_vertical_touch"
+        and transition.kind in _VERTICAL_KINDS
+        and transition.to_space_id
+        and transition.from_level_id
+        and transition.to_level_id
+        and transition.from_level_id != transition.to_level_id
+    ]
+    if not cross_level:
+        return None
+
+    components = {
+        component.resource_id: component
+        for component in surface_vertical_components(model)
+    }
+    by_id = {cell.id: cell for cell in model.cells}
+    surface_transition_ids = {
+        transition.id
+        for transition in model.transitions
+        if transition.source == "surface_vertical_touch"
+    }
+
+    failures: list[str] = []
+    for transition in cross_level:
+        component = components.get(transition.resource_id or "")
+        if component is None:
+            failures.append(f"{transition.id}: resource missing")
+            continue
+        from_landings = [
+            landing
+            for landing in component.landings
+            if landing.space_id == transition.from_space_id
+            and landing.level_id == transition.from_level_id
+            and landing.open_cell_id in by_id
+        ]
+        to_landings = [
+            landing
+            for landing in component.landings
+            if landing.space_id == transition.to_space_id
+            and landing.level_id == transition.to_level_id
+            and landing.open_cell_id in by_id
+        ]
+        if not from_landings or not to_landings:
+            failures.append(f"{transition.id}: landing cell missing")
+            continue
+
+        start = cell_centroid(by_id[from_landings[0].open_cell_id])
+        goal = cell_centroid(by_id[to_landings[0].open_cell_id])
+        route = find_hierarchical_path(model, start, goal)
+        if route is None or len(route.points) < 2:
+            failures.append(f"{transition.id}: no hierarchical route")
+            continue
+        used_surface_transition = any(
+            transition_id in surface_transition_ids
+            for transition_id in route.transition_ids
+        )
+        if not used_surface_transition:
+            failures.append(f"{transition.id}: route did not use physical vertical semantics")
+            continue
+
+        zs = [point[2] for point in route.points]
+        vertical_rise = max(zs) - min(zs)
+        expected_rise = abs(
+            level_elevation.get(transition.to_level_id, goal[2])
+            - level_elevation.get(transition.from_level_id, start[2])
+        )
+        required_rise = min(0.50, expected_rise * 0.50) if expected_rise > 0.0 else 0.0
+        if vertical_rise + 1e-6 < required_rise:
+            failures.append(
+                f"{transition.id}: route rise {vertical_rise:.3f}m below {required_rise:.3f}m"
+            )
+            continue
+
+        return {
+            "source_transition_id": transition.id,
+            "route_transition_ids": route.transition_ids,
+            "space_ids": route.space_ids,
+            "length_m": route.length_m,
+            "waypoint_count": len(route.points),
+            "vertical_rise_m": vertical_rise,
+            "expected_level_rise_m": expected_rise,
+            "start": start,
+            "goal": goal,
+        }
+
+    raise SystemExit(
+        "local-app physical multi-level route qualification failed: "
+        + "; ".join(failures[:8])
+    )
 
 
 def main() -> None:
@@ -128,6 +233,12 @@ def main() -> None:
         raise SystemExit("local-app IFC build did not produce a navigation-ready surface")
     if stats.get("surface_exit_unreachable_spaces", 1) != 0:
         raise SystemExit("local-app IFC build left occupant-egress spaces unreachable")
+
+    physical_route = _qualify_physical_multilevel_route(model)
+    if physical_route is not None:
+        print("local-app physical multi-level route:")
+        print(json.dumps(physical_route, indent=2, sort_keys=True))
+
     print(
         "local-app IFC build passed: "
         f"source={metadata.get('surface_source')} "
