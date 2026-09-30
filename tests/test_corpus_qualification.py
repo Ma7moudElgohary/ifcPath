@@ -64,13 +64,31 @@ def test_pass_nav_requires_surface_readiness() -> None:
     assert failures == ["PASS-NAV case is not surface navigation ready"]
 
 
-def test_manifest_has_unique_cases_and_pinned_sources() -> None:
-    manifest = json.loads(Path("qualification/ifc_corpus.json").read_text(encoding="utf-8"))
-    ids = [case["id"] for case in manifest["cases"]]
+def _all_manifest_cases() -> tuple[list[Path], list[dict]]:
+    paths = sorted(Path("qualification").glob("ifc_corpus*.json"))
+    cases: list[dict] = []
+    for path in paths:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        cases.extend(document["cases"])
+    return paths, cases
+
+
+def test_manifests_have_unique_cases_pinned_sources_and_diversity() -> None:
+    paths, cases = _all_manifest_cases()
+    ids = [case["id"] for case in cases]
+    assert len(paths) >= 2
     assert len(ids) == len(set(ids))
-    assert len(ids) >= 10
-    assert {case["schema"] for case in manifest["cases"]} >= {"IFC2X3", "IFC4", "IFC4X3_ADD2"}
-    for case in manifest["cases"]:
+    assert len(ids) >= 15
+    assert {case["schema"] for case in cases} >= {"IFC2X3", "IFC4", "IFC4X3_ADD2"}
+
+    repositories = {case["source"]["repository"] for case in cases}
+    assert len(repositories) >= 5
+
+    authoring_sources = " ".join(str(case.get("authoring_source", "")) for case in cases).lower()
+    for expected in ("revit", "archicad", "ifcopenshell", "blenderbim"):
+        assert expected in authoring_sources
+
+    for case in cases:
         source = case["source"]
         assert source["commit"]
         assert source["license"]
