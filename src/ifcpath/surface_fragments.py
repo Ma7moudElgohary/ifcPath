@@ -27,6 +27,7 @@ def prune_tiny_space_fragments(
     max_cells: int = 16,
     max_area_m2: float = 0.20,
     max_relative_area: float = 0.10,
+    sampling_cell_size_m: float | None = None,
     portal_protection_m: float = 0.65,
     protect_portal_proximity: bool = True,
     protect_bound_portals: bool = True,
@@ -44,18 +45,35 @@ def prune_tiny_space_fragments(
     * not part of an already-bound semantic crossing; and
     * when requested, not close to an authored semantic portal serving the space.
 
+    The absolute area limit is resolution-aware when ``sampling_cell_size_m`` is
+    supplied. A regular square sampling cell contributes two triangles, each with
+    nominal area ``0.5 * cell_size^2``. Therefore a component that already passes
+    ``max_cells`` should not escape pruning merely because a coarser but still
+    supported detector resolution makes those few triangles exceed a fixed 0.20
+    m2 threshold. The legacy fixed threshold remains the lower bound, while the
+    relative-area, portal and vertical protections still prevent real mezzanines,
+    landings or semantic thresholds from being hidden.
+
     The two portal protections intentionally serve different phases. Before
     semantic finalisation, proximity is conservative evidence that a small patch
     might be a real door threshold. After door binding has run, ``portal_ids`` are
     stronger evidence: a nearby but unused sliver may be removed, while the cells
     that actually carry a door/open-boundary crossing remain protected.
-
-    Consequently a real split-level room, mezzanine, portal threshold or second
-    substantial floor remains visible to readiness validation. The pass targets
-    only tiny sampling islands such as those exposed by the public Duplex model.
     """
     if not cells:
         return FragmentPruneStats()
+
+    effective_max_area_m2 = max(0.0, float(max_area_m2))
+    if sampling_cell_size_m is not None and sampling_cell_size_m > 0.0:
+        # Allow a small quantisation margin for sloped support triangles and BRep
+        # hit variation while keeping the independent max_cells guard authoritative.
+        nominal_max_area = (
+            0.5
+            * max(0, int(max_cells))
+            * float(sampling_cell_size_m) ** 2
+            * 1.05
+        )
+        effective_max_area_m2 = max(effective_max_area_m2, nominal_max_area)
 
     by_id = {cell.id: cell for cell in cells}
     open_ids_by_space: dict[str, set[str]] = defaultdict(set)
@@ -93,7 +111,7 @@ def prune_tiny_space_fragments(
         for area, component in ranked[1:]:
             if len(component) > max_cells:
                 continue
-            if area > max_area_m2 + 1e-9:
+            if area > effective_max_area_m2 + 1e-9:
                 continue
             if area > largest_area * max_relative_area + 1e-9:
                 continue
