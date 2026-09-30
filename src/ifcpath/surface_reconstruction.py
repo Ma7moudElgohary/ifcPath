@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -17,7 +16,8 @@ from .raycast_surface import (
     detect_ifc_walkable_cells,
     ifc_walkable_support_role,
 )
-from .surface_nav import connect_cells_by_shared_edges, stitch_surface_seams, surface_components
+from .surface_nav import connect_cells_by_shared_edges, surface_components
+from .surface_seams import stitch_clearance_aware_seams
 
 
 @dataclass(slots=True)
@@ -33,8 +33,7 @@ class SurfaceReconstructionStats:
     fallback_reason: str | None = None
 
     def to_dict(self) -> dict:
-        raw = asdict(self)
-        return raw
+        return asdict(self)
 
 
 def reconstruct_walkable_surface(
@@ -52,8 +51,8 @@ def reconstruct_walkable_surface(
 
     The legacy importer is deliberately kept as a fallback while this detector is
     qualified against the public IFC corpus. Replacement occurs only when the
-    physical detector produces a non-trivial connected surface. IFC spaces are
-    consulted *after* geometry reconstruction to label cells, never to create Z.
+    physical detector produces a non-trivial surface. IFC spaces are consulted
+    *after* geometry reconstruction to label cells, never to create elevation.
     """
     stats = SurfaceReconstructionStats()
     try:
@@ -96,24 +95,38 @@ def reconstruct_walkable_surface(
     stats.unlabelled_cells = len(cells) - stats.labelled_cells
 
     # Shared grid edges are exact where the detector saw one support manifold.
-    # The conservative seam pass handles modelling gaps between independent IFC
-    # support objects (e.g. stair flight to landing) without proximity graph links.
+    # Independent IFC supports (e.g. flight/landing/slab) are then stitched by
+    # their widest overlapping boundary, not by the first/closest endpoint.
     connect_cells_by_shared_edges(
         cells,
         tolerance_m=max(1e-5, detection_options.hit_merge_tolerance_m * 0.2),
     )
-    stats.seam_count = stitch_surface_seams(
+    stats.seam_count = stitch_clearance_aware_seams(
         cells,
         max_gap_m=max(0.05, detection_options.cell_size_m * 1.1),
         max_vertical_gap_m=max(
             detection_options.max_climb_m + detection_options.hit_merge_tolerance_m,
             0.10,
         ),
+        # Collision sampling has already kept the centreline one body radius from
+        # nearby geometry. A half-radius seam trim prevents a modelling gap from
+        # reintroducing a railing-edge crossing without over-shrinking narrow stairs.
+        edge_clearance_m=detection_options.agent_radius_m * 0.5,
     )
     components = surface_components(cells)
     stats.component_count = len(components)
 
+    # If spaces exist but the geometry-derived surface cannot be semantically
+    # associated at all, keep the known qualified surface rather than publishing
+    # a geometry-only model that would break door binding. Space-free IFCs remain
+    # valid geometry probes and may intentionally have no labels.
+    if model.spaces and stats.labelled_cells == 0:
+        stats.fallback_reason = "detected surface could not be associated with any IFC space"
+        return stats
+
+    legacy_cell_count = len(model.cells)
     model.cells = cells
+    stats.replaced_legacy_surface = True
     model.metadata.update(
         {
             "surface_source": "ifc-physical-raycast",
@@ -123,15 +136,10 @@ def reconstruct_walkable_surface(
             "surface_detector_agent_height_m": detection_options.agent_height_m,
             "surface_detector_max_climb_m": detection_options.max_climb_m,
             "surface_detector_max_slope_deg": detection_options.max_slope_deg,
-            "legacy_cell_count_before_reconstruction": int(
-                model.metadata.get("cell_count", 0) or 0
-            ),
+            "legacy_cell_count_before_reconstruction": legacy_cell_count,
             "cell_count": len(cells),
         }
     )
-    stats.replaced_legacy_surface = True
-    # Refresh the serialized stats now that the replacement flag is true.
-    model.metadata["surface_reconstruction"] = stats.to_dict()
     return stats
 
 
