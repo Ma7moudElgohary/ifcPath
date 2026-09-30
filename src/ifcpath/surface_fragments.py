@@ -25,6 +25,8 @@ def prune_tiny_space_fragments(
     max_area_m2: float = 0.20,
     max_relative_area: float = 0.10,
     portal_protection_m: float = 0.65,
+    protect_portal_proximity: bool = True,
+    protect_bound_portals: bool = True,
 ) -> FragmentPruneStats:
     """Remove tiny detached open-surface islands created by grid sampling.
 
@@ -35,12 +37,19 @@ def prune_tiny_space_fragments(
     * small in cell count;
     * small in physical triangle area;
     * small relative to the space's main component;
-    * not attached to stair/ramp/escalator terrain; and
-    * not close to an authored semantic portal serving that space.
+    * not attached to stair/ramp/escalator terrain;
+    * not part of an already-bound semantic crossing; and
+    * when requested, not close to an authored semantic portal serving the space.
 
-    Consequently a real split-level room, mezzanine or second substantial floor
-    remains visible to readiness validation. The pass targets only tiny sampling
-    islands such as the 4--12-cell fragments exposed by the public Duplex model.
+    The two portal protections intentionally serve different phases. Before
+    semantic finalisation, proximity is conservative evidence that a small patch
+    might be a real door threshold. After door binding has run, ``portal_ids`` are
+    stronger evidence: a nearby but unused sliver may be removed, while the cells
+    that actually carry a door/open-boundary crossing remain protected.
+
+    Consequently a real split-level room, mezzanine, portal threshold or second
+    substantial floor remains visible to readiness validation. The pass targets
+    only tiny sampling islands such as those exposed by the public Duplex model.
     """
     if not cells:
         return FragmentPruneStats()
@@ -52,10 +61,11 @@ def prune_tiny_space_fragments(
             open_ids_by_space[cell.space_id].add(cell.id)
 
     portal_points_by_space: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
-    for portal in model.portals:
-        for space_id in {portal.from_space_id, portal.to_space_id}:
-            if space_id:
-                portal_points_by_space[space_id].append(portal.position_m)
+    if protect_portal_proximity:
+        for portal in model.portals:
+            for space_id in {portal.from_space_id, portal.to_space_id}:
+                if space_id:
+                    portal_points_by_space[space_id].append(portal.position_m)
 
     remove_ids: set[str] = set()
     removed_components = 0
@@ -83,11 +93,16 @@ def prune_tiny_space_fragments(
                 continue
             if _touches_vertical(component, by_id):
                 continue
-            if _near_semantic_portal(
-                component,
-                by_id,
-                portal_points_by_space.get(space_id, ()),
-                portal_protection_m,
+            if protect_bound_portals and _has_bound_semantic_crossing(component, by_id):
+                continue
+            if (
+                protect_portal_proximity
+                and _near_semantic_portal(
+                    component,
+                    by_id,
+                    portal_points_by_space.get(space_id, ()),
+                    portal_protection_m,
+                )
             ):
                 continue
             remove_ids.update(component)
@@ -147,6 +162,26 @@ def _touches_vertical(component: set[str], by_id: dict[str, NavCell]) -> bool:
                 continue
             neighbor = by_id.get(neighbor_id)
             if neighbor is not None and neighbor.terrain in _VERTICAL_TERRAINS:
+                return True
+    return False
+
+
+def _has_bound_semantic_crossing(
+    component: set[str],
+    by_id: dict[str, NavCell],
+) -> bool:
+    """Return whether a component participates in an actual semantic crossing.
+
+    Bindings are normally reciprocal, but checking the neighbouring cell as well
+    keeps pruning robust when reading older/partially-normalised INAV payloads.
+    """
+    for cell_id in component:
+        cell = by_id[cell_id]
+        if any(cell.portal_ids.values()):
+            return True
+        for neighbor_id in cell.neighbor_ids:
+            neighbor = by_id.get(neighbor_id)
+            if neighbor is not None and neighbor.portal_ids.get(cell_id):
                 return True
     return False
 
