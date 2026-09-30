@@ -201,8 +201,16 @@ def classify_result(result: CorpusCaseResult) -> list[str]:
         categories.add("D_SPACE_SEMANTICS")
     if any("VERTICAL" in code for code in codes):
         categories.add("G_STAIR_RAMP_RECONSTRUCTION")
-    if any("EXIT" in code or "CROSS_LEVEL" in code for code in codes):
+
+    # Legacy sampled-node reachability is compatibility telemetry and must not
+    # be mislabeled as a modern readiness defect when the authoritative surface
+    # is healthy. Only surface-authoritative exit/cross-level codes belong to K.
+    if any(
+        code.startswith("SURFACE_") and ("EXIT" in code or "CROSS_LEVEL" in code)
+        for code in codes
+    ):
         categories.add("K_READINESS_CLASSIFICATION")
+
     if result.routing.get("representative_route_attempted") and not result.routing.get("representative_route_exists"):
         categories.add("J_ROUTE_FUNNEL")
     if result.routing.get("multilevel_route_attempted") and not result.routing.get("multilevel_route_exists"):
@@ -327,11 +335,21 @@ def _route_metrics(model) -> dict[str, Any]:
             return metrics
 
     # Last-resort diagnostic for models whose vertical semantics have not yet
-    # been recovered. Keep this bounded: one representative cell per surfaced
-    # level and at most 12 cross-level attempts.
+    # been recovered. Restrict this to occupant-egress spaces: exterior/service
+    # roof levels are intentionally routable-but-exempt and should not create a
+    # false stair/ramp failure merely because they have geometry on another Z.
+    required_space_ids = {
+        space.id
+        for space in model.spaces
+        if not space.is_external and space.egress_required
+    }
     level_cells: dict[str, list[Any]] = {}
     for cell in model.cells:
-        if cell.level_id and cell.space_id and cell.terrain == "open":
+        if (
+            cell.level_id
+            and cell.space_id in required_space_ids
+            and cell.terrain == "open"
+        ):
             level_cells.setdefault(cell.level_id, []).append(cell)
     levels = [level for level in model.levels if level.id in level_cells]
     levels.sort(key=lambda level: level.elevation_m)
