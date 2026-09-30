@@ -122,7 +122,8 @@ def reconstruct_walkable_surface(
     # can be separated by almost 2*cell_size in the triangulated result. The seam
     # allowance therefore follows that geometric sampling bound. Body-clearance
     # carving is larger around walls/railings, so this does not re-authorise a
-    # normal obstacle gap; open/open cross-space seams remain prohibited anyway.
+    # normal obstacle gap. Crucially, the unified open-floor field is never seam-
+    # healed: a missing flat sample can represent furniture or another obstacle.
     sampling_gap_m = (
         2.0 * detection_options.cell_size_m
         + detection_options.hit_merge_tolerance_m
@@ -138,6 +139,7 @@ def reconstruct_walkable_surface(
         # nearby geometry. A half-radius seam trim prevents a modelling gap from
         # reintroducing a railing-edge crossing without over-shrinking narrow stairs.
         edge_clearance_m=detection_options.agent_radius_m * 0.5,
+        vertical_only=True,
     )
     components = surface_components(cells)
     stats.component_count = len(components)
