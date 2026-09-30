@@ -88,6 +88,8 @@ def main() -> None:
     diagnostic = {
         "surface_source": metadata.get("surface_source"),
         "surface_reconstruction": reconstruction,
+        "surface_fragment_pruning": metadata.get("surface_fragment_pruning"),
+        "surface_postbind_fragment_pruning": metadata.get("surface_postbind_fragment_pruning"),
         "surface_cell_count": stats.get("surface_cell_count"),
         "surface_component_count": stats.get("surface_component_count"),
         "surface_space_count": stats.get("surface_space_count"),
