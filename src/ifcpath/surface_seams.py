@@ -161,8 +161,8 @@ def _parallel_overlap_portal(
     # Check true geometric separation at the overlap midpoint, not merely that
     # infinite projected lines are parallel.
     middle = (low + high) * 0.5
-    pa_mid = _point_at_axis_parameter(a0, a1, axis_xy, middle)
-    pb_mid = _point_at_axis_parameter(b0, b1, axis_xy, middle)
+    pa_mid = _point_at_axis_parameter(a0, a1, axis_xy, origin_xy, middle)
+    pb_mid = _point_at_axis_parameter(b0, b1, axis_xy, origin_xy, middle)
     if (
         abs(pa_mid[2] - pb_mid[2]) > max_vertical_gap_m
         or math.dist(pa_mid, pb_mid) > max_gap_m
@@ -179,10 +179,10 @@ def _parallel_overlap_portal(
         # wide portal. Collapse it to the centre instead.
         low = high = (low + high) * 0.5
 
-    pa0 = _point_at_axis_parameter(a0, a1, axis_xy, low)
-    pb0 = _point_at_axis_parameter(b0, b1, axis_xy, low)
-    pa1 = _point_at_axis_parameter(a0, a1, axis_xy, high)
-    pb1 = _point_at_axis_parameter(b0, b1, axis_xy, high)
+    pa0 = _point_at_axis_parameter(a0, a1, axis_xy, origin_xy, low)
+    pb0 = _point_at_axis_parameter(b0, b1, axis_xy, origin_xy, low)
+    pa1 = _point_at_axis_parameter(a0, a1, axis_xy, origin_xy, high)
+    pb1 = _point_at_axis_parameter(b0, b1, axis_xy, origin_xy, high)
     return _midpoint(pa0, pb0), _midpoint(pa1, pb1)
 
 
@@ -190,11 +190,18 @@ def _point_at_axis_parameter(
     start: Vec3,
     end: Vec3,
     axis_xy: tuple[float, float],
+    origin_xy: tuple[float, float],
     target: float,
 ) -> Vec3:
-    start_param = 0.0
-    delta_xy = (end[0] - start[0], end[1] - start[1])
-    length_param = delta_xy[0] * axis_xy[0] + delta_xy[1] * axis_xy[1]
+    def parameter(point: Vec3) -> float:
+        return (
+            (point[0] - origin_xy[0]) * axis_xy[0]
+            + (point[1] - origin_xy[1]) * axis_xy[1]
+        )
+
+    start_param = parameter(start)
+    end_param = parameter(end)
+    length_param = end_param - start_param
     if abs(length_param) <= 1e-10:
         return start
     t = (target - start_param) / length_param
