@@ -90,3 +90,71 @@ def test_multilayer_samples_become_continuous_triangle_surface():
     assert cells[0].id in cells[1].neighbor_ids
     assert min(v[2] for cell in cells for v in cell.vertices_m) == 0.0
     assert max(v[2] for cell in cells for v in cell.vertices_m) == 0.18
+
+
+def test_three_clearance_samples_create_one_partial_quad_triangle():
+    opts = SurfaceDetectionOptions(
+        cell_size_m=0.30,
+        max_climb_m=0.22,
+        max_slope_deg=50.0,
+        minimum_component_cells=1,
+        minimum_component_area_m2=0.0,
+    )
+    domain = SurfaceSamplingDomain(
+        id="door-neck",
+        bounds=(0.0, 0.0, 0.0, 0.3, 0.3, 0.0),
+        terrain="open",
+    )
+    # NE is missing because clearance rejected that grid sample. The remaining
+    # SW/SE/NW support still defines a real half-quad and must not disappear.
+    samples = [
+        _SupportSample(0, 0, (0.0, 0.0, 0.0), 1, "open"),
+        _SupportSample(1, 0, (0.3, 0.0, 0.0), 1, "open"),
+        _SupportSample(0, 1, (0.0, 0.3, 0.0), 1, "open"),
+    ]
+
+    cells = _triangulate_samples(domain, samples, opts)
+
+    assert len(cells) == 1
+    assert set(cells[0].vertices_m) == {sample.position for sample in samples}
+
+
+def test_three_corner_quad_does_not_bridge_incompatible_vertical_jump():
+    opts = SurfaceDetectionOptions(
+        cell_size_m=0.30,
+        max_climb_m=0.20,
+        max_slope_deg=20.0,
+        minimum_component_cells=1,
+        minimum_component_area_m2=0.0,
+    )
+    domain = SurfaceSamplingDomain(
+        id="ledge",
+        bounds=(0.0, 0.0, 0.0, 0.3, 0.3, 1.0),
+        terrain="open",
+    )
+    samples = [
+        _SupportSample(0, 0, (0.0, 0.0, 0.0), 1, "open"),
+        _SupportSample(1, 0, (0.3, 0.0, 0.0), 1, "open"),
+        _SupportSample(0, 1, (0.0, 0.3, 0.8), 2, "open"),
+    ]
+
+    assert _triangulate_samples(domain, samples, opts) == []
+
+
+def test_two_corner_gap_is_never_filled():
+    opts = SurfaceDetectionOptions(
+        cell_size_m=0.30,
+        minimum_component_cells=1,
+        minimum_component_area_m2=0.0,
+    )
+    domain = SurfaceSamplingDomain(
+        id="obstacle-strip",
+        bounds=(0.0, 0.0, 0.0, 0.3, 0.3, 0.0),
+        terrain="open",
+    )
+    samples = [
+        _SupportSample(0, 0, (0.0, 0.0, 0.0), 1, "open"),
+        _SupportSample(1, 0, (0.3, 0.0, 0.0), 1, "open"),
+    ]
+
+    assert _triangulate_samples(domain, samples, opts) == []
