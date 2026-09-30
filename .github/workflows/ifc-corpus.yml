@@ -9,6 +9,7 @@ on:
       - "qualification/**"
       - "tests/test_corpus_qualification.py"
       - "tests/test_ifc_loader_robustness.py"
+      - "tests/test_multi_door_surface_binding.py"
       - "pyproject.toml"
       - ".github/workflows/ifc-corpus.yml"
   push:
@@ -20,6 +21,7 @@ on:
       - "qualification/**"
       - "tests/test_corpus_qualification.py"
       - "tests/test_ifc_loader_robustness.py"
+      - "tests/test_multi_door_surface_binding.py"
       - "pyproject.toml"
       - ".github/workflows/ifc-corpus.yml"
   schedule:
@@ -66,7 +68,12 @@ jobs:
           python -m pip install -e ".[test]"
 
       - name: Unit regression tests
-        run: python -m pytest tests/test_corpus_qualification.py tests/test_ifc_loader_robustness.py -q
+        run: |
+          python -m pytest \
+            tests/test_corpus_qualification.py \
+            tests/test_ifc_loader_robustness.py \
+            tests/test_multi_door_surface_binding.py \
+            -q
 
       - name: Select corpus tier
         id: tier
@@ -75,10 +82,6 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "value=${{ inputs.tier }}" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "value=2" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # PR #39 qualification burn-in: run the full public corpus once
-            # before restoring normal Tier 1 PR behavior for merge.
             echo "value=2" >> "$GITHUB_OUTPUT"
           else
             echo "value=1" >> "$GITHUB_OUTPUT"
