@@ -5,7 +5,8 @@ from pathlib import Path
 
 import ifcopenshell
 import ifcopenshell.geom
-from shapely.geometry import Point
+from shapely.geometry import Point, box
+from shapely.ops import unary_union
 
 from .cdt import space_floor_polygon
 from .model import InavModel, NavCell
@@ -49,22 +50,23 @@ def reconstruct_walkable_surface(
 ) -> SurfaceReconstructionStats:
     """Replace legacy cells with a geometry-derived physical support surface.
 
-    The legacy importer is deliberately kept as a fallback while this detector is
-    qualified against the public IFC corpus. Replacement occurs only when the
-    physical detector produces a non-trivial surface. IFC spaces are consulted
-    *after* geometry reconstruction to label cells, never to create elevation.
+    The detector is intentionally geometry-first. Physical IFC support elements
+    are scanned as one multi-layer field so coincident floor finishes/slabs and
+    vertical circulation do not trigger duplicate ray passes. IFC spaces are
+    consulted only after geometry reconstruction to label cells; they never
+    manufacture walkable elevation.
+
+    Adjacency is rebuilt *after* semantic labelling. This ordering is critical:
+    connecting anonymous cells first and labelling them later leaves stale
+    room-to-room edges that bypass doors. Rebuilding after labelling lets the
+    normal shared-edge rule reject unauthorised open/open space crossings while
+    retaining open/stair/ramp geometric continuity.
     """
     stats = SurfaceReconstructionStats()
     try:
         ifc_file = ifcopenshell.open(str(ifc_path))
     except Exception as exc:
         stats.fallback_reason = f"cannot reopen IFC for physical surface detection: {exc}"
-        return stats
-
-    domains = _support_domains(ifc_file, model)
-    stats.support_elements = len(domains)
-    if not domains:
-        stats.fallback_reason = "no physical walkable-support IFC elements found"
         return stats
 
     detection_options = SurfaceDetectionOptions(
@@ -74,6 +76,16 @@ def reconstruct_walkable_surface(
         max_slope_deg=max(0.0, min(89.0, float(max_slope_deg))),
         max_climb_m=max(0.0, float(max_climb_m)),
     )
+    domains = _support_domains(
+        ifc_file,
+        model,
+        padding_m=detection_options.cell_size_m * 0.75,
+    )
+    stats.support_elements = sum(len(domain.support_entity_ids) for domain in domains)
+    if not domains:
+        stats.fallback_reason = "no physical walkable-support IFC elements found"
+        return stats
+
     cells, detector_stats = detect_ifc_walkable_cells(
         ifc_file,
         domains,
@@ -94,16 +106,30 @@ def reconstruct_walkable_surface(
     stats.labelled_cells = sum(cell.space_id is not None for cell in cells)
     stats.unlabelled_cells = len(cells) - stats.labelled_cells
 
-    # Shared grid edges are exact where the detector saw one support manifold.
-    # Independent IFC supports (e.g. flight/landing/slab) are then stitched by
-    # their widest overlapping boundary, not by the first/closest endpoint.
+    # The ray detector connects anonymous geometry so it can prune tiny physical
+    # patches. Those links are not semantically authoritative. Clear them now and
+    # rebuild against the final space labels so only same-space open surfaces or
+    # physical vertical terrain remain connected. Doors/open boundaries are
+    # authorised later by the portable semantic finalisation pass.
+    _clear_surface_adjacency(cells)
     connect_cells_by_shared_edges(
         cells,
         tolerance_m=max(1e-5, detection_options.hit_merge_tolerance_m * 0.2),
     )
+
+    # A regular sample grid can end up to one cell inside each physical support
+    # boundary, so two genuinely touching independently reconstructed supports
+    # can be separated by almost 2*cell_size in the triangulated result. The seam
+    # allowance therefore follows that geometric sampling bound. Body-clearance
+    # carving is larger around walls/railings, so this does not re-authorise a
+    # normal obstacle gap; open/open cross-space seams remain prohibited anyway.
+    sampling_gap_m = (
+        2.0 * detection_options.cell_size_m
+        + detection_options.hit_merge_tolerance_m
+    )
     stats.seam_count = stitch_clearance_aware_seams(
         cells,
-        max_gap_m=max(0.05, detection_options.cell_size_m * 1.1),
+        max_gap_m=max(0.05, sampling_gap_m),
         max_vertical_gap_m=max(
             detection_options.max_climb_m + detection_options.hit_merge_tolerance_m,
             0.10,
@@ -143,34 +169,79 @@ def reconstruct_walkable_surface(
     return stats
 
 
-def _support_domains(ifc_file, model: InavModel) -> list[SurfaceSamplingDomain]:
-    level_by_guid = {level.id.removeprefix("level:"): level.id for level in model.levels}
-    domains: list[SurfaceSamplingDomain] = []
+def _support_domains(
+    ifc_file,
+    model: InavModel,
+    *,
+    padding_m: float = 0.0,
+) -> list[SurfaceSamplingDomain]:
+    """Build one global multi-layer support domain from all physical supports.
+
+    A building can contain several coincident support representations (structural
+    slab + finish) and many storeys at the same XY. Scanning per element repeats
+    the same expensive geometry-tree ray. A single domain casts each XY ray once
+    through the complete vertical extent and retains every compatible support hit,
+    which is the multi-layer-heightfield behaviour needed for indoor navigation.
+
+    ``clip_xy`` is the union of buffered support footprints, preventing the global
+    bounding box from turning into a huge rectangular sampling workload.
+    """
+    del model  # semantic levels are assigned after physical reconstruction
+    support_ids: set[int] = set()
+    support_bounds: list[tuple[float, float, float, float, float, float]] = []
+    footprints = []
     try:
         elements = list(ifc_file.by_type("IfcElement"))
     except Exception:
         elements = []
 
     for entity in elements:
-        terrain = ifc_walkable_support_role(entity)
-        if terrain is None:
+        if ifc_walkable_support_role(entity) is None:
             continue
         bounds = _bbox(entity)
         if bounds is None:
             continue
-        entity_id = int(entity.id())
-        guid = str(_safe_attr(entity, "GlobalId", entity_id))
-        level_id = _entity_level_id(entity, level_by_guid)
-        domains.append(
-            SurfaceSamplingDomain(
-                id=f"support:{guid}",
-                bounds=bounds,
-                support_entity_ids=frozenset({entity_id}),
-                level_id=level_id,
-                terrain=terrain,
-            )
+        try:
+            support_ids.add(int(entity.id()))
+        except Exception:
+            continue
+        support_bounds.append(bounds)
+        footprint = box(bounds[0], bounds[1], bounds[3], bounds[4])
+        if padding_m > 0.0:
+            footprint = footprint.buffer(padding_m, cap_style="square", join_style="mitre")
+        footprints.append(footprint)
+
+    if not support_bounds or not support_ids:
+        return []
+
+    bounds = (
+        min(item[0] for item in support_bounds),
+        min(item[1] for item in support_bounds),
+        min(item[2] for item in support_bounds),
+        max(item[3] for item in support_bounds),
+        max(item[4] for item in support_bounds),
+        max(item[5] for item in support_bounds),
+    )
+    clip_xy = unary_union(footprints) if footprints else None
+    if clip_xy is not None and clip_xy.is_empty:
+        clip_xy = None
+
+    return [
+        SurfaceSamplingDomain(
+            id="support:multilayer",
+            bounds=bounds,
+            support_entity_ids=frozenset(support_ids),
+            terrain="",  # classify every ray hit from its actual IFC support type
+            clip_xy=clip_xy,
         )
-    return domains
+    ]
+
+
+def _clear_surface_adjacency(cells: list[NavCell]) -> None:
+    for cell in cells:
+        cell.neighbor_ids.clear()
+        cell.portals.clear()
+        cell.portal_ids.clear()
 
 
 def _label_cells_from_ifc_spaces(ifc_file, model: InavModel, cells: list[NavCell]) -> None:
