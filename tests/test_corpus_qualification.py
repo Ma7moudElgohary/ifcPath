@@ -6,11 +6,14 @@ from pathlib import Path
 
 from ifcpath.corpus_qualification import (
     CorpusCaseResult,
+    _route_metrics,
+    classify_result,
     evaluate_expectations,
     git_blob_sha1,
     read_ifc_schema,
     verify_download,
 )
+from ifcpath.model import InavModel, Level, NavCell, Space
 
 
 def test_git_blob_sha1_matches_git_object_format() -> None:
@@ -62,6 +65,57 @@ def test_pass_nav_requires_surface_readiness() -> None:
     )
     failures = evaluate_expectations({"expected_outcome": "PASS-NAV"}, result)
     assert failures == ["PASS-NAV case is not surface navigation ready"]
+
+
+def test_legacy_exit_warning_does_not_become_surface_readiness_category() -> None:
+    result = CorpusCaseResult(
+        case_id="surface-ready",
+        name="surface ready with legacy fragmentation",
+        expected_outcome="PASS-PARTIAL",
+        validation_stats={"surface_navigation_ready": True},
+        issues=[
+            {
+                "severity": "warning",
+                "code": "NODES_CANNOT_REACH_EXIT",
+                "message": "compatibility nodes cannot reach exit",
+                "entity_id": None,
+            }
+        ],
+        routing={"multilevel_route_attempted": False, "multilevel_route_exists": False},
+    )
+    assert classify_result(result) == []
+
+
+def test_multilevel_diagnostic_ignores_service_only_roof_level() -> None:
+    model = InavModel(
+        levels=[
+            Level(id="L1", name="Ground", elevation_m=0.0),
+            Level(id="L2", name="Roof", elevation_m=3.0),
+        ],
+        spaces=[
+            Space(id="occupied", name="Occupied", level_id="L1", egress_required=True),
+            Space(id="roof-service", name="Roof service", level_id="L2", egress_required=False),
+        ],
+        cells=[
+            NavCell(
+                id="ground-cell",
+                vertices_m=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+                space_id="occupied",
+                level_id="L1",
+                terrain="open",
+            ),
+            NavCell(
+                id="roof-cell",
+                vertices_m=((0.0, 0.0, 3.0), (1.0, 0.0, 3.0), (0.0, 1.0, 3.0)),
+                space_id="roof-service",
+                level_id="L2",
+                terrain="open",
+            ),
+        ],
+    )
+    metrics = _route_metrics(model)
+    assert metrics["multilevel_route_attempted"] is False
+    assert metrics["multilevel_route_exists"] is False
 
 
 def _all_manifest_cases() -> tuple[list[Path], list[dict]]:
