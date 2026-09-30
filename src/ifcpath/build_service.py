@@ -6,6 +6,7 @@ from typing import Any
 
 from .exporter import model_from_dict
 from .ifc_loader import BuildOptions, build_from_ifc
+from .surface_reconstruction import reconstruct_walkable_surface
 from .validation import validate_model
 
 
@@ -22,9 +23,12 @@ def build_inav_payload(
 ) -> dict[str, Any]:
     """Build and qualify portable INAV directly from uploaded IFC bytes.
 
-    The same IfcOpenShell -> continuous surface -> portable semantic finalization
-    path used by the CLI is reused here. The temporary filesystem path is never
-    persisted into the returned model metadata.
+    The legacy importer still extracts IFC semantics and supplies a qualified
+    fallback surface. Before portable semantic finalization, the local app now
+    attempts to replace those cells with a physical support surface reconstructed
+    from the complete IFC geometry. This makes floors/stairs/ramps and collision
+    clearance authoritative while retaining a deterministic fallback during
+    corpus qualification.
     """
     if not data:
         raise IfcBuildRequestError("IFC upload is empty")
@@ -45,7 +49,24 @@ def build_inav_payload(
             stream.write(data)
             temp_path = Path(stream.name)
 
-        raw_model = build_from_ifc(temp_path, options or BuildOptions())
+        resolved_options = options or BuildOptions()
+        raw_model = build_from_ifc(temp_path, resolved_options)
+        surface_stats = reconstruct_walkable_surface(
+            temp_path,
+            raw_model,
+            cell_size_m=min(max(resolved_options.stair_spacing_m, 0.10), 0.20),
+            agent_height_m=resolved_options.agent_height_m,
+            # A zero-radius centreline navmesh is exactly the behaviour that let
+            # routes touch furniture/railings. Use a human-body default unless
+            # the caller explicitly requests a larger clearance.
+            agent_radius_m=max(0.22, resolved_options.agent_clearance_m),
+            max_slope_deg=resolved_options.max_slope_deg,
+            max_climb_m=0.24,
+        )
+        if not surface_stats.replaced_legacy_surface:
+            raw_model.metadata["surface_reconstruction"] = surface_stats.to_dict()
+            raw_model.metadata.setdefault("surface_source", "legacy-qualified-fallback")
+
         # model_from_dict runs the exact portable semantic finalization used when
         # an INAV is loaded/saved (door recovery, open boundaries, vertical
         # transitions and egress-domain classification).
