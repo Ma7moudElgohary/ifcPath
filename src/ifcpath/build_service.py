@@ -51,11 +51,12 @@ def build_inav_payload(
             temp_path = Path(stream.name)
 
         resolved_options = options or BuildOptions()
+        surface_cell_size_m = min(max(resolved_options.stair_spacing_m, 0.10), 0.20)
         raw_model = build_from_ifc(temp_path, resolved_options)
         surface_stats = reconstruct_walkable_surface(
             temp_path,
             raw_model,
-            cell_size_m=min(max(resolved_options.stair_spacing_m, 0.10), 0.20),
+            cell_size_m=surface_cell_size_m,
             agent_height_m=resolved_options.agent_height_m,
             # A zero-radius centreline navmesh is exactly the behaviour that let
             # routes touch furniture/railings. Use a human-body default unless
@@ -69,7 +70,11 @@ def build_inav_payload(
             # correctly labelled room. Before semantic binding, authored portal
             # proximity is conservative evidence that a tiny patch could be a real
             # threshold, so keep it for the first finalisation pass.
-            fragment_stats = prune_tiny_space_fragments(raw_model.cells, raw_model)
+            fragment_stats = prune_tiny_space_fragments(
+                raw_model.cells,
+                raw_model,
+                sampling_cell_size_m=surface_cell_size_m,
+            )
             raw_model.metadata["surface_fragment_pruning"] = {
                 "removed_cells": fragment_stats.removed_cells,
                 "removed_components": fragment_stats.removed_components,
@@ -95,6 +100,7 @@ def build_inav_payload(
             post_stats = prune_tiny_space_fragments(
                 model.cells,
                 model,
+                sampling_cell_size_m=surface_cell_size_m,
                 protect_portal_proximity=False,
                 protect_bound_portals=True,
             )
