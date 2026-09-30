@@ -55,6 +55,9 @@ class SurfaceDetectionStats:
     rays: int = 0
     candidate_hits: int = 0
     clearance_rejections: int = 0
+    clearance_broadphase_queries: int = 0
+    clearance_precise_queries: int = 0
+    clearance_precise_skips: int = 0
     headroom_rejections: int = 0
     samples: int = 0
     cells_before_pruning: int = 0
@@ -176,10 +179,21 @@ def detect_ifc_walkable_cells(
 def _native_geometry_tree(ifc_file):
     settings = ifcopenshell.geom.settings()
     settings.set(settings.USE_WORLD_COORDS, True)
+
+    # Navigation collision only needs physical IFC elements. Excluding spatial
+    # containers, annotations and other non-elements keeps the OpenCASCADE tree
+    # smaller without removing any support or obstruction geometry.
+    try:
+        physical_elements = list(ifc_file.by_type("IfcElement"))
+    except Exception:
+        physical_elements = []
+
+    kwargs = {"include": physical_elements} if physical_elements else {}
     iterator = ifcopenshell.geom.iterator(
         settings,
         ifc_file,
         max(1, min(multiprocessing.cpu_count(), 8)),
+        **kwargs,
     )
     tree = ifcopenshell.geom.tree()
     if not iterator.initialize():
@@ -264,6 +278,7 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                     position=position,
                     opts=opts,
                     classify=classify,
+                    stats=stats,
                 ):
                     stats.clearance_rejections += 1
                     continue
@@ -302,41 +317,91 @@ def _body_clearance_blocked(
     position,
     opts,
     classify,
+    stats: SurfaceDetectionStats | None = None,
 ):
     if opts.agent_radius_m <= 0.0:
         return False
 
     # Approximate the upright pedestrian cylinder with overlapping exact sphere
-    # queries. This catches furniture/columns/railings beside the route, not only
-    # geometry directly pierced by the vertical support ray.
+    # queries. Before invoking OpenCASCADE's expensive precise geometry test, use
+    # its UB-tree bounding-box query as a conservative broad phase. Any geometry
+    # intersecting the exact sphere must also intersect that sphere's AABB, so an
+    # empty/non-blocking box result can safely skip the precise query.
     low = max(opts.agent_radius_m, 0.20)
     top = max(low, opts.agent_height_m - opts.agent_radius_m)
     heights = {low, min(top, max(0.70, opts.agent_height_m * 0.50)), top}
+    radius = float(opts.agent_radius_m)
+
     for dz in sorted(heights):
+        center = (
+            float(position[0]),
+            float(position[1]),
+            float(position[2] + dz),
+        )
+
+        broadphase = None
         try:
-            selected = tree.select(
-                (position[0], position[1], position[2] + dz),
-                extend=opts.agent_radius_m,
-            )
+            if stats is not None:
+                stats.clearance_broadphase_queries += 1
+            broadphase = tree.select_box(center, extend=radius)
+        except Exception:
+            # Older/alternate geometry-tree backends may not support dilating a
+            # point query. Falling back to the exact query preserves correctness.
+            broadphase = None
+
+        if broadphase is not None:
+            if not any(
+                _clearance_candidate_blocks(
+                    ifc_file,
+                    raw,
+                    ignored_entity_ids=ignored_entity_ids,
+                    classify=classify,
+                )
+                for raw in broadphase
+            ):
+                if stats is not None:
+                    stats.clearance_precise_skips += 1
+                continue
+
+        try:
+            if stats is not None:
+                stats.clearance_precise_queries += 1
+            selected = tree.select(center, extend=radius)
         except Exception:
             return False
 
-        for raw in selected:
-            entity = _selected_entity(ifc_file, raw)
-            if entity is None:
-                continue
-            try:
-                entity_id = int(entity.id())
-            except Exception:
-                continue
-            if entity_id in ignored_entity_ids:
-                continue
-            if classify(entity) in _NON_BLOCKING_CLASSES:
-                continue
-            if not _is_physical_element(entity):
-                continue
+        if any(
+            _clearance_candidate_blocks(
+                ifc_file,
+                raw,
+                ignored_entity_ids=ignored_entity_ids,
+                classify=classify,
+            )
+            for raw in selected
+        ):
             return True
     return False
+
+
+def _clearance_candidate_blocks(
+    ifc_file,
+    raw,
+    *,
+    ignored_entity_ids,
+    classify,
+):
+    entity = _selected_entity(ifc_file, raw)
+    if entity is None:
+        return False
+    try:
+        entity_id = int(entity.id())
+    except Exception:
+        return False
+    if entity_id in ignored_entity_ids:
+        return False
+    if classify(entity) in _NON_BLOCKING_CLASSES:
+        return False
+    return _is_physical_element(entity)
 
 
 def _triangulate_samples(domain, samples, opts):
@@ -443,7 +508,11 @@ def _quad_layer_triangles(
         # introducing an unnecessarily sharp fold across a sloped/riser quad.
         rise_a = abs(sw.position[2] - ne.position[2])
         rise_b = abs(se.position[2] - nw.position[2])
-        return list(diagonal_sw_ne if (rise_a, sw.owner_id, ne.owner_id) <= (rise_b, se.owner_id, nw.owner_id) else diagonal_se_nw)
+        return list(
+            diagonal_sw_ne
+            if (rise_a, sw.owner_id, ne.owner_id) <= (rise_b, se.owner_id, nw.owner_id)
+            else diagonal_se_nw
+        )
     if valid_a:
         return list(diagonal_sw_ne)
     if valid_b:
