@@ -66,10 +66,9 @@ def build_inav_payload(
         )
         if surface_stats.replaced_legacy_surface:
             # Grid/BRep intersections can leave tiny detached triangles inside a
-            # correctly labelled room. Remove only very small islands that are
-            # also insignificant relative to the room's main support component.
-            # Stair/ramp attachments and authored portal thresholds are protected,
-            # so this cannot hide a real split-level or alternate walking floor.
+            # correctly labelled room. Before semantic binding, authored portal
+            # proximity is conservative evidence that a tiny patch could be a real
+            # threshold, so keep it for the first finalisation pass.
             fragment_stats = prune_tiny_space_fragments(raw_model.cells, raw_model)
             raw_model.metadata["surface_fragment_pruning"] = {
                 "removed_cells": fragment_stats.removed_cells,
@@ -80,10 +79,33 @@ def build_inav_payload(
             raw_model.metadata["surface_reconstruction"] = surface_stats.to_dict()
             raw_model.metadata.setdefault("surface_source", "legacy-qualified-fallback")
 
-        # model_from_dict runs the exact portable semantic finalization used when
-        # an INAV is loaded/saved (door recovery, open boundaries, vertical
-        # transitions and egress-domain classification).
+        # First semantic pass binds real door/open-boundary crossings and derives
+        # vertical resources from the reconstructed physical manifold.
         model = model_from_dict(raw_model.to_dict())
+
+        if surface_stats.replaced_legacy_surface:
+            # Now that portal_ids are authoritative, portal *proximity* alone is no
+            # longer a reason to retain a tiny island. This second conservative pass
+            # removes an unused door-near sampling sliver while explicitly protecting
+            # any component that participates in a bound semantic crossing or actual
+            # stair/ramp/escalator connection.
+            post_stats = prune_tiny_space_fragments(
+                model.cells,
+                model,
+                protect_portal_proximity=False,
+                protect_bound_portals=True,
+            )
+            model.metadata["surface_postbind_fragment_pruning"] = {
+                "removed_cells": post_stats.removed_cells,
+                "removed_components": post_stats.removed_components,
+            }
+            model.metadata["cell_count"] = len(model.cells)
+            if post_stats.removed_cells:
+                # Re-run the shared idempotent portable finalisation so door/open
+                # boundary and surface-vertical semantics are rebuilt against the
+                # cleaned authoritative cell set.
+                model = model_from_dict(model.to_dict())
+
         model.metadata["source_ifc"] = safe_name
         model.metadata["source"] = "local-app-upload"
         report = validate_model(model)
