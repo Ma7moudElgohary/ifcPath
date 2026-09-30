@@ -125,3 +125,31 @@ def test_elevator_semantics_can_connect_separate_surface_components() -> None:
     assert report.stats["surface_cross_level_transitions"] >= 1
     assert report.stats["surface_exit_unreachable_spaces"] == 0
     assert report.stats["navigation_ready"] is True
+
+
+def test_unreachable_occupant_space_is_identified_not_only_counted() -> None:
+    model = InavModel(
+        levels=[Level("L1", "Level 1", 0.0)],
+        spaces=[Space("exit-room", "Exit Room", "L1"), Space("isolated", "Isolated Office", "L1")],
+        portals=[
+            Portal(
+                id="exit:door",
+                kind="door",
+                position_m=(0.2, 0.2, 0.0),
+                from_space_id="exit-room",
+                level_id="L1",
+                is_exit=True,
+            )
+        ],
+        cells=[
+            _cell("exit-room:0", 0.0, space_id="exit-room", level_id="L1"),
+            _cell("isolated:0", 10.0, space_id="isolated", level_id="L1"),
+        ],
+    )
+
+    report = validate_model(model)
+
+    assert report.stats["surface_exit_unreachable_spaces"] == 1
+    issue = next(issue for issue in report.issues if issue.code == "SURFACE_SPACE_CANNOT_REACH_EXIT")
+    assert issue.entity_id == "isolated"
+    assert "Isolated Office" in issue.message

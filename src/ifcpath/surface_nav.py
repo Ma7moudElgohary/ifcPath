@@ -91,9 +91,10 @@ def connect_cells_through_portal(
 ) -> bool:
     """Authorize one semantic door crossing in the metric surface graph.
 
-    The nearest cell on each room side is projected to the door position. The
-    crossing keeps both geometric portal endpoints and the semantic portal ID,
-    so consumers can close/block the door dynamically without rebuilding cells.
+    Candidate cells on both room sides are ranked by geometric distance to the
+    authored door position. The nearest *free* pair is selected so two nearby
+    doors never overwrite the one semantic portal ID that a NavCell adjacency
+    can store. Repeating the same portal is idempotent and may reuse its pair.
     """
     if not from_space_id or not to_space_id or from_space_id == to_space_id:
         return False
@@ -107,16 +108,53 @@ def connect_cells_through_portal(
         ]
         return exact_level or [cell for cell in cells if cell.space_id == space_id]
 
-    left = closest_cell(candidates(from_space_id), point)
-    right = closest_cell(candidates(to_space_id), point)
-    if left is None or right is None:
+    def ranked(space_id: str):
+        matches = []
+        for cell in candidates(space_id):
+            projected = _closest_point_on_triangle(point, *cell.vertices_m)
+            distance = math.dist(point, projected)
+            if distance <= max_distance_m:
+                matches.append((distance, cell.id, projected, cell))
+        matches.sort(key=lambda item: (item[0], item[1]))
+        return matches
+
+    left = ranked(from_space_id)
+    right = ranked(to_space_id)
+    if not left or not right:
         return False
 
-    a, qa, da = left
-    b, qb, db = right
-    if a.id == b.id or da > max_distance_m or db > max_distance_m:
+    pair_candidates = []
+    for da, _, qa, a in left:
+        for db, _, qb, b in right:
+            if a.id == b.id:
+                continue
+            existing_left = a.portal_ids.get(b.id)
+            existing_right = b.portal_ids.get(a.id)
+            existing_ids = {
+                existing
+                for existing in (existing_left, existing_right)
+                if existing is not None
+            }
+            if existing_ids and existing_ids != {portal_id}:
+                continue
+            pair_candidates.append(
+                (
+                    da + db,
+                    max(da, db),
+                    a.id,
+                    b.id,
+                    a,
+                    qa,
+                    b,
+                    qb,
+                )
+            )
+
+    if not pair_candidates:
         return False
 
+    pair_candidates.sort(key=lambda item: item[:4])
+    _, _, _, _, a, qa, b, qb = pair_candidates[0]
     _connect_pair(a, b)
 
     ac = cell_centroid(a)
