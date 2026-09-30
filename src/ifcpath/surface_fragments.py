@@ -15,6 +15,9 @@ _VERTICAL_TERRAINS = {"stair", "ramp", "escalator"}
 class FragmentPruneStats:
     removed_cells: int = 0
     removed_components: int = 0
+    protected_vertical_components: int = 0
+    protected_bound_portal_components: int = 0
+    protected_portal_proximity_components: int = 0
 
 
 def prune_tiny_space_fragments(
@@ -69,6 +72,9 @@ def prune_tiny_space_fragments(
 
     remove_ids: set[str] = set()
     removed_components = 0
+    protected_vertical_components = 0
+    protected_bound_portal_components = 0
+    protected_portal_proximity_components = 0
 
     for space_id, owned_ids in open_ids_by_space.items():
         components = _local_components(owned_ids, by_id)
@@ -92,8 +98,10 @@ def prune_tiny_space_fragments(
             if area > largest_area * max_relative_area + 1e-9:
                 continue
             if _touches_vertical(component, by_id):
+                protected_vertical_components += 1
                 continue
             if protect_bound_portals and _has_bound_semantic_crossing(component, by_id):
+                protected_bound_portal_components += 1
                 continue
             if (
                 protect_portal_proximity
@@ -104,6 +112,7 @@ def prune_tiny_space_fragments(
                     portal_protection_m,
                 )
             ):
+                protected_portal_proximity_components += 1
                 continue
             remove_ids.update(component)
             removed_components += 1
@@ -128,6 +137,9 @@ def prune_tiny_space_fragments(
     return FragmentPruneStats(
         removed_cells=len(remove_ids),
         removed_components=removed_components,
+        protected_vertical_components=protected_vertical_components,
+        protected_bound_portal_components=protected_bound_portal_components,
+        protected_portal_proximity_components=protected_portal_proximity_components,
     )
 
 
