@@ -37,6 +37,56 @@ def test_tiny_relative_sampling_island_is_pruned_and_references_are_cleaned():
     assert witness.portal_ids == {}
 
 
+def test_resolution_aware_area_limit_prunes_a_twelve_triangle_grid_island():
+    main = _cell("main", ((0, 0, 0), (4, 0, 0), (0, 2, 0)))  # 4 m2
+    island = []
+    for index in range(12):
+        previous = f"tiny:{index - 1}" if index else None
+        following = f"tiny:{index + 1}" if index < 11 else None
+        neighbors = [item for item in (previous, following) if item]
+        x = 10.0 + index * 0.25
+        # Each triangle is 0.02 m2, so the component totals 0.24 m2: larger
+        # than the legacy fixed 0.20 m2 cutoff but still only twelve triangles.
+        island.append(
+            _cell(
+                f"tiny:{index}",
+                ((x, 0, 0), (x + 0.2, 0, 0), (x, 0.2, 0)),
+                neighbors=neighbors,
+            )
+        )
+
+    without_resolution = [main, *island]
+    fixed_stats = prune_tiny_space_fragments(without_resolution, InavModel())
+    assert fixed_stats.removed_cells == 0
+
+    # Rebuild because pruning is intentionally in-place.
+    main = _cell("main", ((0, 0, 0), (4, 0, 0), (0, 2, 0)))
+    island = []
+    for index in range(12):
+        previous = f"tiny:{index - 1}" if index else None
+        following = f"tiny:{index + 1}" if index < 11 else None
+        neighbors = [item for item in (previous, following) if item]
+        x = 10.0 + index * 0.25
+        island.append(
+            _cell(
+                f"tiny:{index}",
+                ((x, 0, 0), (x + 0.2, 0, 0), (x, 0.2, 0)),
+                neighbors=neighbors,
+            )
+        )
+    cells = [main, *island]
+
+    stats = prune_tiny_space_fragments(
+        cells,
+        InavModel(),
+        sampling_cell_size_m=0.20,
+    )
+
+    assert stats.removed_cells == 12
+    assert stats.removed_components == 1
+    assert [cell.id for cell in cells] == ["main"]
+
+
 def test_substantial_second_surface_is_not_hidden():
     main = _cell("main", ((0, 0, 0), (4, 0, 0), (0, 2, 0)))  # 4 m2
     second = _cell("second", ((10, 0, 0), (12, 0, 0), (10, 1, 0)))  # 1 m2
