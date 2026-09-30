@@ -48,7 +48,7 @@ def test_substantial_second_surface_is_not_hidden():
     assert {cell.id for cell in cells} == {"main", "second"}
 
 
-def test_tiny_portal_threshold_surface_is_protected():
+def test_tiny_portal_threshold_surface_is_protected_before_binding():
     main = _cell("main", ((0, 0, 0), (4, 0, 0), (0, 2, 0)))
     tiny = _cell("tiny", ((10, 0, 0), (10.2, 0, 0), (10, 0.2, 0)))
     model = InavModel(
@@ -68,6 +68,72 @@ def test_tiny_portal_threshold_surface_is_protected():
 
     assert stats.removed_cells == 0
     assert {cell.id for cell in cells} == {"main", "tiny"}
+
+
+def test_unused_door_near_sliver_is_removed_after_binding_phase():
+    main = _cell("main", ((0, 0, 0), (4, 0, 0), (0, 2, 0)))
+    tiny = _cell("tiny", ((10, 0, 0), (10.2, 0, 0), (10, 0.2, 0)))
+    model = InavModel(
+        portals=[
+            Portal(
+                id="door",
+                kind="door",
+                position_m=(10.05, 0.05, 0.0),
+                from_space_id="S",
+                to_space_id="T",
+            )
+        ]
+    )
+    cells = [main, tiny]
+
+    stats = prune_tiny_space_fragments(
+        cells,
+        model,
+        protect_portal_proximity=False,
+        protect_bound_portals=True,
+    )
+
+    assert stats.removed_cells == 1
+    assert {cell.id for cell in cells} == {"main"}
+
+
+def test_actual_bound_portal_threshold_is_protected_after_binding_phase():
+    main = _cell("main", ((0, 0, 0), (4, 0, 0), (0, 2, 0)))
+    tiny = _cell(
+        "tiny",
+        ((10, 0, 0), (10.2, 0, 0), (10, 0.2, 0)),
+        neighbors=["other"],
+    )
+    other = _cell(
+        "other",
+        ((10.2, 0, 0), (10.4, 0, 0), (10.2, 0.2, 0)),
+        space="T",
+        neighbors=["tiny"],
+    )
+    tiny.portal_ids["other"] = "door"
+    other.portal_ids["tiny"] = "door"
+    model = InavModel(
+        portals=[
+            Portal(
+                id="door",
+                kind="door",
+                position_m=(10.2, 0.05, 0.0),
+                from_space_id="S",
+                to_space_id="T",
+            )
+        ]
+    )
+    cells = [main, tiny, other]
+
+    stats = prune_tiny_space_fragments(
+        cells,
+        model,
+        protect_portal_proximity=False,
+        protect_bound_portals=True,
+    )
+
+    assert stats.removed_cells == 0
+    assert {cell.id for cell in cells} == {"main", "tiny", "other"}
 
 
 def test_tiny_landing_attached_to_vertical_surface_is_protected():
