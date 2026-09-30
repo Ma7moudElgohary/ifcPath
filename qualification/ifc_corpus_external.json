@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "description": "Additional independently maintained public IFC cases used by the combined IfcPath qualification corpus.",
+  "cases": [
+    {
+      "id": "xbim-samplehouse-revit-ifc4",
+      "name": "xBIM SampleHouse4 (Revit 2015 IFC4)",
+      "source": {
+        "repository": "xBimTeam/XbimEssentials",
+        "commit": "e3c877712aeff39813219b9dd13383c266d07055",
+        "path": "Tests/TestFiles/SampleHouse4.ifc",
+        "url": "https://raw.githubusercontent.com/xBimTeam/XbimEssentials/e3c877712aeff39813219b9dd13383c266d07055/Tests/TestFiles/SampleHouse4.ifc",
+        "git_blob_sha1": "06b47ad4154f9038843eb86e832b39fe9354abe5",
+        "license": "CDDL-1.0",
+        "license_url": "https://github.com/xBimTeam/XbimEssentials/blob/e3c877712aeff39813219b9dd13383c266d07055/LICENCE.md",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "Autodesk Revit 2015",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2, 3],
+      "tags": ["independent-source", "revit", "ifc4", "spaces", "millimetres", "multistorey", "xbim"]
+    },
+    {
+      "id": "ifcos-webviewer-sample-ifc4",
+      "name": "IfcOpenShell Web Viewer Sample IFC4",
+      "source": {
+        "repository": "IfcOpenShell/IfcOpenShell",
+        "commit": "c0a05fb941d1961c87b98029c140a5dcd77a186f",
+        "path": "src/ifcviewer-web/sample.ifc",
+        "url": "https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/c0a05fb941d1961c87b98029c140a5dcd77a186f/src/ifcviewer-web/sample.ifc",
+        "git_blob_sha1": "04836854226fa503d04b3e7720c58548d15f8fe7",
+        "license": "LGPL-3.0-or-later",
+        "license_url": "https://github.com/IfcOpenShell/IfcOpenShell/blob/c0a05fb941d1961c87b98029c140a5dcd77a186f/COPYING.LESSER",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "IfcOpenShell",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["independent-source", "ifcopenshell", "ifc4", "synthetic", "geometry-only", "slab-fallback"]
+    },
+    {
+      "id": "ifcos-georef-a-ifc4",
+      "name": "IfcOpenShell Georeferenced IFC4 A",
+      "source": {
+        "repository": "IfcOpenShell/IfcOpenShell",
+        "commit": "c0a05fb941d1961c87b98029c140a5dcd77a186f",
+        "path": "src/ifcviewer-web/georef-a.ifc",
+        "url": "https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/c0a05fb941d1961c87b98029c140a5dcd77a186f/src/ifcviewer-web/georef-a.ifc",
+        "git_blob_sha1": "6453ac09b2b5ebd219c696117616018ecac522eb",
+        "license": "LGPL-3.0-or-later",
+        "license_url": "https://github.com/IfcOpenShell/IfcOpenShell/blob/c0a05fb941d1961c87b98029c140a5dcd77a186f/COPYING.LESSER",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "IfcOpenShell",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["independent-source", "ifcopenshell", "ifc4", "georeferencing", "map-conversion", "EPSG-3857", "geometry-only"]
+    },
+    {
+      "id": "ifcos-blenderbim-basic-ifc4",
+      "name": "IfcOpenShell BlenderBIM Basic IFC4",
+      "source": {
+        "repository": "IfcOpenShell/IfcOpenShell",
+        "commit": "c0a05fb941d1961c87b98029c140a5dcd77a186f",
+        "path": "src/ifcpatch/test/files/basic.ifc",
+        "url": "https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/c0a05fb941d1961c87b98029c140a5dcd77a186f/src/ifcpatch/test/files/basic.ifc",
+        "git_blob_sha1": "c3216408334f492da0f619439e880e861b76add3",
+        "license": "LGPL-3.0-or-later",
+        "license_url": "https://github.com/IfcOpenShell/IfcOpenShell/blob/c0a05fb941d1961c87b98029c140a5dcd77a186f/COPYING.LESSER",
+        "redistributable": true
+      },
+      "schema": "IFC4",
+      "authoring_source": "BlenderBIM / IfcOpenShell",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "tags": ["independent-source", "blenderbim", "ifcopenshell", "ifc4", "polygonal-face-set", "tessellation", "multistorey"]
+    },
+    {
+      "id": "bsc-schependomlaan-archicad-ifc2x3",
+      "name": "buildingSMART Schependomlaan Archicad IFC2x3",
+      "source": {
+        "repository": "buildingsmart-community/Community-Sample-Test-Files",
+        "commit": "7ddf57a201f88a0c213d5322b02ed15e94a60a40",
+        "path": "IFC 2.3.0.1 (IFC 2x3)/Schependomlaan/Design model IFC/IFC Schependomlaan.ifc",
+        "url": "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%202.3.0.1%20(IFC%202x3)/Schependomlaan/Design%20model%20IFC/IFC%20Schependomlaan.ifc",
+        "sha256": "2c3565ca1904f2aa61adab92024cf3755b2c5b21a498144d3094d7cb58cebec7",
+        "size_bytes": 49286967,
+        "license": "CC-BY-4.0",
+        "license_url": "https://github.com/buildingsmart-community/Community-Sample-Test-Files/blob/7ddf57a201f88a0c213d5322b02ed15e94a60a40/README.md",
+        "redistributable": true
+      },
+      "schema": "IFC2X3",
+      "authoring_source": "Graphisoft Archicad / ROOT bv",
+      "expected_outcome": "PASS-PARTIAL",
+      "tiers": [2],
+      "timeout_seconds": 1200,
+      "tags": ["real-building", "archicad", "ifc2x3", "large", "performance", "spaces", "doors", "authoring-diversity"]
+    }
+  ]
+}
