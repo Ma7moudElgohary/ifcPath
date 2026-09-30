@@ -73,3 +73,56 @@ def test_stitcher_prefers_widest_candidate_between_same_two_cells():
     # Portal is centred between the two tread edges rather than sitting at x=0.
     assert portal[0][0] >= 0.19
     assert portal[1][0] <= 1.01
+
+
+def test_vertical_only_stitching_preserves_flat_obstacle_gap():
+    left = NavCell(
+        id="left",
+        vertices_m=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+        terrain="open",
+        space_id="S",
+    )
+    right = NavCell(
+        id="right",
+        vertices_m=((0.0, 1.20, 0.0), (1.0, 1.20, 0.0), (0.0, 2.20, 0.0)),
+        terrain="open",
+        space_id="S",
+    )
+
+    added = stitch_clearance_aware_seams(
+        [left, right],
+        max_gap_m=0.25,
+        max_vertical_gap_m=0.25,
+        edge_clearance_m=0.05,
+        vertical_only=True,
+    )
+
+    assert added == 0
+    assert left.neighbor_ids == []
+    assert right.neighbor_ids == []
+
+
+def test_vertical_only_stitching_can_bridge_stair_to_landing_gap():
+    landing = NavCell(
+        id="landing",
+        vertices_m=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+        terrain="open",
+        space_id="S",
+    )
+    stair = NavCell(
+        id="stair",
+        vertices_m=((0.0, 1.20, 0.18), (1.0, 1.20, 0.18), (0.0, 2.20, 0.40)),
+        terrain="stair",
+    )
+
+    added = stitch_clearance_aware_seams(
+        [landing, stair],
+        max_gap_m=0.30,
+        max_vertical_gap_m=0.25,
+        edge_clearance_m=0.05,
+        vertical_only=True,
+    )
+
+    assert added == 1
+    assert stair.id in landing.neighbor_ids
+    assert landing.id in stair.neighbor_ids
