@@ -83,6 +83,10 @@ jobs:
             echo "value=${{ inputs.tier }}" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "schedule" ]]; then
             echo "value=2" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Expansion burn-in: exercise every newly added public source before
+            # this slice is merged, then restore normal Tier 1 PR cadence.
+            echo "value=2" >> "$GITHUB_OUTPUT"
           else
             echo "value=1" >> "$GITHUB_OUTPUT"
           fi
@@ -91,8 +95,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/ifc-corpus
-          key: ifc-corpus-v1-${{ runner.os }}-${{ hashFiles('qualification/ifc_corpus.json') }}
+          key: ifc-corpus-v2-${{ runner.os }}-${{ hashFiles('qualification/ifc_corpus*.json') }}
           restore-keys: |
+            ifc-corpus-v2-${{ runner.os }}-
             ifc-corpus-v1-${{ runner.os }}-
 
       - name: Qualify public IFC corpus

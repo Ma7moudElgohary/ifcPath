@@ -33,7 +33,17 @@ CATEGORY_LABELS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download and qualify the pinned public IFC corpus")
-    parser.add_argument("--manifest", type=Path, default=Path("qualification/ifc_corpus.json"))
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        action="append",
+        dest="manifests",
+        default=[],
+        help=(
+            "Corpus manifest to load; repeat to combine manifests. When omitted, "
+            "all qualification/ifc_corpus*.json manifests are composed."
+        ),
+    )
     parser.add_argument("--tier", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--case", action="append", dest="case_ids", default=[])
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache/ifc-corpus"))
@@ -41,7 +51,8 @@ def main() -> None:
     parser.add_argument("--no-fail", action="store_true", help="Write reports without failing the process")
     args = parser.parse_args()
 
-    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    manifest_paths = args.manifests or sorted(Path("qualification").glob("ifc_corpus*.json"))
+    manifest = load_manifests(manifest_paths)
     defaults = manifest.get("defaults", {})
     cases = [case for case in manifest["cases"] if args.tier in case.get("tiers", [])]
     if args.case_ids:
@@ -87,6 +98,63 @@ def main() -> None:
     )
     if not args.no_fail and (summary["failed"] or summary["errors"]):
         raise SystemExit(2)
+
+
+def load_manifests(paths: list[Path]) -> dict[str, Any]:
+    """Compose independently maintained corpus manifests into one qualification set.
+
+    The base manifest owns normal build defaults, while source-family manifests
+    can add cases without creating one monolithic JSON file. Duplicate case IDs
+    fail closed so a new source can never silently replace an existing contract.
+    """
+    if not paths:
+        raise SystemExit("no IFC corpus manifests found")
+
+    schema_version: int | None = None
+    defaults: dict[str, Any] = {}
+    cases: list[dict[str, Any]] = []
+    seen: dict[str, Path] = {}
+    manifest_paths: list[str] = []
+
+    for path in paths:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        current_schema = int(document.get("schema_version", 1))
+        if schema_version is None:
+            schema_version = current_schema
+        elif current_schema != schema_version:
+            raise SystemExit(
+                f"corpus manifest schema mismatch: {path} has {current_schema}, expected {schema_version}"
+            )
+
+        defaults = _merge_defaults(defaults, document.get("defaults", {}))
+        for case in document.get("cases", []):
+            case_id = str(case.get("id", ""))
+            if not case_id:
+                raise SystemExit(f"corpus case without id in {path}")
+            if case_id in seen:
+                raise SystemExit(f"duplicate corpus case id {case_id!r}: {seen[case_id]} and {path}")
+            seen[case_id] = path
+            cases.append(case)
+        manifest_paths.append(str(path))
+
+    if not cases:
+        raise SystemExit("composed IFC corpus contains no cases")
+    return {
+        "schema_version": schema_version or 1,
+        "defaults": defaults,
+        "cases": cases,
+        "manifest_paths": manifest_paths,
+    }
+
+
+def _merge_defaults(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in incoming.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = {**result[key], **value}
+        else:
+            result[key] = value
+    return result
 
 
 def run_case(
@@ -204,6 +272,7 @@ def build_summary(tier: int, manifest: dict[str, Any], results: list[dict[str, A
         "schema_version": 1,
         "tier": tier,
         "corpus_schema_version": manifest.get("schema_version"),
+        "manifest_paths": manifest.get("manifest_paths", []),
         "duration_seconds": duration,
         "total": len(results),
         "passed": sum(result.get("status") == "pass" for result in results),
