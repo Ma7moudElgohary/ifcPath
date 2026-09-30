@@ -6,6 +6,7 @@ from typing import Any
 
 from .exporter import model_from_dict
 from .ifc_loader import BuildOptions, build_from_ifc
+from .surface_fragments import prune_tiny_space_fragments
 from .surface_reconstruction import reconstruct_walkable_surface
 from .validation import validate_model
 
@@ -63,7 +64,19 @@ def build_inav_payload(
             max_slope_deg=resolved_options.max_slope_deg,
             max_climb_m=0.24,
         )
-        if not surface_stats.replaced_legacy_surface:
+        if surface_stats.replaced_legacy_surface:
+            # Grid/BRep intersections can leave tiny detached triangles inside a
+            # correctly labelled room. Remove only very small islands that are
+            # also insignificant relative to the room's main support component.
+            # Stair/ramp attachments and authored portal thresholds are protected,
+            # so this cannot hide a real split-level or alternate walking floor.
+            fragment_stats = prune_tiny_space_fragments(raw_model.cells, raw_model)
+            raw_model.metadata["surface_fragment_pruning"] = {
+                "removed_cells": fragment_stats.removed_cells,
+                "removed_components": fragment_stats.removed_components,
+            }
+            raw_model.metadata["cell_count"] = len(raw_model.cells)
+        else:
             raw_model.metadata["surface_reconstruction"] = surface_stats.to_dict()
             raw_model.metadata.setdefault("surface_source", "legacy-qualified-fallback")
 
