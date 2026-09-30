@@ -340,47 +340,58 @@ def _body_clearance_blocked(
 
 
 def _triangulate_samples(domain, samples, opts):
+    """Triangulate a multi-layer clearance field without extra grid erosion.
+
+    A valid support sample is already clearance-filtered. Requiring all four
+    corners of a grid quad before emitting any surface adds an unintended extra
+    cell of erosion around doorway/railing boundaries: one rejected corner can
+    cut a false hole through a narrow but otherwise valid passage.
+
+    Each grid quad is therefore treated independently. Four compatible corners
+    produce exactly two non-overlapping triangles. Three compatible corners
+    produce exactly one triangle. Two-corner gaps are never bridged, so a real
+    obstacle strip or missing support remains disconnected. Multiple Z layers are
+    handled by anchoring each layer at the first populated corner and selecting
+    only vertically compatible samples from the other corners.
+    """
     by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
     for sample in samples:
         by_xy[(sample.ix, sample.iy)].append(sample)
     for bucket in by_xy.values():
-        bucket.sort(key=lambda sample: sample.position[2])
+        bucket.sort(key=lambda sample: (sample.position[2], sample.owner_id))
+
+    quad_origins: set[tuple[int, int]] = set()
+    for ix, iy in by_xy:
+        for ox in (ix - 1, ix):
+            for oy in (iy - 1, iy):
+                quad_origins.add((ox, oy))
 
     cells: list[NavCell] = []
     created: set[tuple] = set()
-    for (ix, iy), origins in sorted(by_xy.items()):
-        east = by_xy.get((ix + 1, iy), ())
-        north = by_xy.get((ix, iy + 1), ())
-        diagonal = by_xy.get((ix + 1, iy + 1), ())
-        if not east or not north or not diagonal:
+    for ix, iy in sorted(quad_origins):
+        # Counter-clockwise plan order: SW, SE, NE, NW.
+        corner_keys = (
+            (ix, iy),
+            (ix + 1, iy),
+            (ix + 1, iy + 1),
+            (ix, iy + 1),
+        )
+        buckets = [by_xy.get(key, ()) for key in corner_keys]
+        populated = [index for index, bucket in enumerate(buckets) if bucket]
+        if len(populated) < 3:
             continue
 
-        for origin in origins:
-            b = _nearest_compatible(origin, east, opts)
-            c = _nearest_compatible(origin, north, opts)
-            if b is None or c is None:
-                continue
-            d_candidates = [
-                candidate
-                for candidate in diagonal
-                if _samples_compatible(b, candidate, opts)
-                and _samples_compatible(c, candidate, opts)
-                and _samples_compatible(origin, candidate, opts, diagonal=True)
-            ]
-            if not d_candidates:
-                continue
-            d = min(
-                d_candidates,
-                key=lambda sample: (
-                    abs(sample.position[2] - origin.position[2]),
-                    sample.owner_id,
-                ),
-            )
+        anchor_index = populated[0]
+        for anchor in buckets[anchor_index]:
+            selected: dict[int, _SupportSample] = {anchor_index: anchor}
+            for corner_index in populated[1:]:
+                candidate = _nearest_grid_compatible(anchor, buckets[corner_index], opts)
+                if candidate is not None:
+                    selected[corner_index] = candidate
 
-            for vertices, terrain in (
-                ((origin.position, b.position, d.position), _majority_terrain(origin, b, d)),
-                ((origin.position, d.position, c.position), _majority_terrain(origin, d, c)),
-            ):
+            triangles = _quad_layer_triangles(selected, opts)
+            for triangle in triangles:
+                vertices = tuple(sample.position for sample in triangle)
                 key = _triangle_key(vertices, opts.hit_merge_tolerance_m)
                 if key in created or _triangle_area_3d(*vertices) <= 1e-8:
                     continue
@@ -391,7 +402,7 @@ def _triangulate_samples(domain, samples, opts):
                         vertices_m=vertices,
                         space_id=domain.space_id,
                         level_id=domain.level_id,
-                        terrain=terrain,
+                        terrain=_majority_terrain(*triangle),
                     )
                 )
 
@@ -400,6 +411,82 @@ def _triangulate_samples(domain, samples, opts):
         tolerance_m=max(1e-5, opts.hit_merge_tolerance_m * 0.2),
     )
     return cells
+
+
+def _quad_layer_triangles(
+    selected: dict[int, _SupportSample],
+    opts: SurfaceDetectionOptions,
+) -> list[tuple[_SupportSample, _SupportSample, _SupportSample]]:
+    """Return a non-overlapping triangulation for one sampled grid layer."""
+    if len(selected) < 3:
+        return []
+
+    if len(selected) == 3:
+        indices = tuple(sorted(selected))
+        triangle = tuple(selected[index] for index in indices)
+        return [triangle] if _triangle_samples_compatible(triangle, opts) else []
+
+    sw, se, ne, nw = (selected[index] for index in range(4))
+    diagonal_sw_ne = (
+        (sw, se, ne),
+        (sw, ne, nw),
+    )
+    diagonal_se_nw = (
+        (sw, se, nw),
+        (se, ne, nw),
+    )
+    valid_a = all(_triangle_samples_compatible(triangle, opts) for triangle in diagonal_sw_ne)
+    valid_b = all(_triangle_samples_compatible(triangle, opts) for triangle in diagonal_se_nw)
+
+    if valid_a and valid_b:
+        # Prefer the diagonal with the smaller vertical jump. This avoids
+        # introducing an unnecessarily sharp fold across a sloped/riser quad.
+        rise_a = abs(sw.position[2] - ne.position[2])
+        rise_b = abs(se.position[2] - nw.position[2])
+        return list(diagonal_sw_ne if (rise_a, sw.owner_id, ne.owner_id) <= (rise_b, se.owner_id, nw.owner_id) else diagonal_se_nw)
+    if valid_a:
+        return list(diagonal_sw_ne)
+    if valid_b:
+        return list(diagonal_se_nw)
+    return []
+
+
+def _triangle_samples_compatible(
+    triangle: tuple[_SupportSample, _SupportSample, _SupportSample],
+    opts: SurfaceDetectionOptions,
+) -> bool:
+    a, b, c = triangle
+    return (
+        _grid_samples_compatible(a, b, opts)
+        and _grid_samples_compatible(b, c, opts)
+        and _grid_samples_compatible(c, a, opts)
+    )
+
+
+def _nearest_grid_compatible(source, candidates, opts):
+    valid = [candidate for candidate in candidates if _grid_samples_compatible(source, candidate, opts)]
+    if not valid:
+        return None
+    return min(
+        valid,
+        key=lambda sample: (
+            abs(sample.position[2] - source.position[2]),
+            sample.owner_id,
+        ),
+    )
+
+
+def _grid_samples_compatible(a, b, opts):
+    dx = abs(a.ix - b.ix)
+    dy = abs(a.iy - b.iy)
+    if dx == 0 and dy == 0:
+        return abs(a.position[2] - b.position[2]) <= opts.hit_merge_tolerance_m
+    if dx > 1 or dy > 1:
+        return False
+    horizontal = opts.cell_size_m * math.hypot(dx, dy)
+    dz = abs(a.position[2] - b.position[2])
+    slope_limit = math.tan(math.radians(opts.max_slope_deg)) * horizontal
+    return dz <= max(opts.max_climb_m, slope_limit) + opts.hit_merge_tolerance_m
 
 
 def _prune_small_components(cells, opts):
