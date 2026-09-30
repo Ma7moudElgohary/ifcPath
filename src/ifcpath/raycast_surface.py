@@ -54,6 +54,8 @@ class SurfaceDetectionStats:
     domains: int = 0
     rays: int = 0
     candidate_hits: int = 0
+    candidate_layers: int = 0
+    deduplicated_candidate_hits: int = 0
     clearance_rejections: int = 0
     clearance_broadphase_queries: int = 0
     clearance_precise_queries: int = 0
@@ -70,6 +72,16 @@ class SurfaceDetectionStats:
 class _SupportSample:
     ix: int
     iy: int
+    position: Vec3
+    owner_id: int
+    terrain: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SupportCandidate:
+    """One top-face support hit before coincident representations are collapsed."""
+
+    hit_index: int
     position: Vec3
     owner_id: int
     terrain: str
@@ -239,11 +251,14 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
             hits.sort(key=lambda hit: float(hit.distance))
             positions = [tuple(float(value) for value in hit.position) for hit in hits]
 
-            # A downward ray may hit both top and bottom faces of a slab. For a
-            # support element we keep only its first sufficiently horizontal hit:
-            # the physical top surface. This also tolerates inconsistent BRep face
-            # orientation because abs(normal.z) is used after top-face selection.
+            # A downward ray may hit both top and bottom faces of a slab. Gather
+            # one top-face candidate per support entity first. Real BIMs commonly
+            # model one physical walking layer several times (structural slab +
+            # finish + stair component). Clearance depends on the physical layer,
+            # not on how many IFC objects describe it, so coincident elevations
+            # are collapsed before the expensive OpenCASCADE body-clearance pass.
             seen_supports: set[int] = set()
+            candidates: list[_SupportCandidate] = []
             for index, hit in enumerate(hits):
                 position = positions[index]
                 if position[2] < z0 - opts.vertical_padding_m or position[2] > z1 + opts.vertical_padding_m:
@@ -257,7 +272,8 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                     continue
                 if support_ids and entity_id not in support_ids:
                     continue
-                if not support_ids and ifc_walkable_support_role(entity) is None:
+                role = ifc_walkable_support_role(entity)
+                if not support_ids and role is None:
                     continue
                 if entity_id in seen_supports:
                     continue
@@ -267,15 +283,34 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                     continue
                 seen_supports.add(entity_id)
                 stats.candidate_hits += 1
+                candidates.append(
+                    _SupportCandidate(
+                        hit_index=index,
+                        position=(x, y, position[2]),
+                        owner_id=entity_id,
+                        terrain=domain.terrain or role or "open",
+                    )
+                )
 
-                if _headroom_blocked(index, positions, position[2], opts.agent_height_m):
+            for layer in _group_support_candidates(candidates, opts.hit_merge_tolerance_m):
+                stats.candidate_layers += 1
+                stats.deduplicated_candidate_hits += max(0, len(layer) - 1)
+                candidate = _preferred_support_candidate(layer)
+                if _headroom_blocked(
+                    candidate.hit_index,
+                    positions,
+                    candidate.position[2],
+                    opts.agent_height_m,
+                ):
                     stats.headroom_rejections += 1
                     continue
+
+                ignored_support_ids = support_ids or {item.owner_id for item in layer}
                 if _body_clearance_blocked(
                     tree,
                     ifc_file,
-                    ignored_entity_ids=support_ids or {entity_id},
-                    position=position,
+                    ignored_entity_ids=ignored_support_ids,
+                    position=candidate.position,
                     opts=opts,
                     classify=classify,
                     stats=stats,
@@ -283,18 +318,51 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                     stats.clearance_rejections += 1
                     continue
 
-                sample = _SupportSample(
-                    ix=ix,
-                    iy=iy,
-                    position=(x, y, position[2]),
-                    owner_id=entity_id,
-                    terrain=domain.terrain or ifc_walkable_support_role(entity) or "open",
+                _append_unique_sample(
+                    samples_by_xy[(ix, iy)],
+                    _SupportSample(
+                        ix=ix,
+                        iy=iy,
+                        position=candidate.position,
+                        owner_id=candidate.owner_id,
+                        terrain=candidate.terrain,
+                    ),
+                    opts.hit_merge_tolerance_m,
                 )
-                _append_unique_sample(samples_by_xy[(ix, iy)], sample, opts.hit_merge_tolerance_m)
 
     result = [sample for bucket in samples_by_xy.values() for sample in bucket]
     stats.samples += len(result)
     return result
+
+
+def _group_support_candidates(candidates, tolerance):
+    """Group top-face hits that describe the same physical XY/Z support layer."""
+    if not candidates:
+        return []
+    ordered = sorted(
+        candidates,
+        key=lambda item: (-item.position[2], item.hit_index, item.owner_id),
+    )
+    groups: list[list[_SupportCandidate]] = []
+    for candidate in ordered:
+        if groups and abs(groups[-1][0].position[2] - candidate.position[2]) <= tolerance:
+            groups[-1].append(candidate)
+        else:
+            groups.append([candidate])
+    return groups
+
+
+def _preferred_support_candidate(layer):
+    """Choose one representative while preserving vertical-circulation terrain."""
+    return min(
+        layer,
+        key=lambda item: (
+            item.terrain == "open",
+            item.hit_index,
+            -item.position[2],
+            item.owner_id,
+        ),
+    )
 
 
 def _headroom_blocked(index, positions, z, required_height):
