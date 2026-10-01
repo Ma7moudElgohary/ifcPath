@@ -4,12 +4,13 @@ on:
   pull_request:
     branches: [main]
     paths: &release_paths
-      - 'src/ifcpath/app_runner.py'
-      - 'src/ifcpath/study_api.py'
+      - 'src/ifcpath/**'
       - 'scripts/build_local_app.py'
       - 'scripts/ifcpath_app_entry.py'
       - 'scripts/install_local_app.ps1'
+      - 'scripts/assert_local_app_build.py'
       - 'viewer/**'
+      - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/local-app-release.yml'
   workflow_dispatch:
@@ -104,11 +105,17 @@ jobs:
         shell: pwsh
         run: |
           $ifc = Join-Path $env:RUNNER_TEMP 'Duplex_A_20110907.ifc'
+          $stdout = Join-Path $env:RUNNER_TEMP 'ifcpath-standalone.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'ifcpath-standalone.stderr.log'
           Invoke-WebRequest `
             'https://raw.githubusercontent.com/andyward/XBimDemo/master/Xbim.TestApp/Duplex_A_20110907.ifc' `
             -OutFile $ifc
           $exe = Resolve-Path 'dist/IFCPathApp/IFCPathApp.exe'
-          $process = Start-Process $exe -ArgumentList '--no-open','--port','8767' -PassThru
+          $process = Start-Process $exe `
+            -ArgumentList '--no-open','--port','8767' `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -PassThru
           try {
             $ready = $false
             for ($i = 0; $i -lt 60; $i++) {
@@ -126,6 +133,10 @@ jobs:
             Set-Location ..
           } finally {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Write-Host '--- IFCPath standalone stdout ---'
+            Get-Content $stdout -ErrorAction SilentlyContinue
+            Write-Host '--- IFCPath standalone stderr ---'
+            Get-Content $stderr -ErrorAction SilentlyContinue
           }
 
       - name: Upload browser diagnostics on failure
@@ -137,6 +148,8 @@ jobs:
           path: |
             viewer/playwright-report
             viewer/test-results
+            ${{ runner.temp }}/ifcpath-standalone.stdout.log
+            ${{ runner.temp }}/ifcpath-standalone.stderr.log
 
       - name: Assemble release archives
         shell: pwsh

@@ -8,6 +8,9 @@ from .portal_recovery import portal_surface_distances
 from .vertical_surface import find_surface_vertical_transfer
 
 
+_VERTICAL_TERRAINS = {"stair", "ramp", "escalator"}
+
+
 @dataclass(frozen=True, slots=True)
 class SurfaceReadinessIssue:
     severity: str
@@ -138,18 +141,19 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
 
     split_surface_spaces = 0
     for space_id in sorted(surface_spaces):
-        owned_ids = {cell.id for cell in open_cells if cell.space_id == space_id}
-        local_adjacency = {
-            cell_id: {neighbor for neighbor in adjacency.get(cell_id, ()) if neighbor in owned_ids}
-            for cell_id in owned_ids
-        }
-        local_components = _components(local_adjacency)
-        if len(local_components) > 1:
+        owned_open_ids = {cell.id for cell in open_cells if cell.space_id == space_id}
+        count = _space_surface_component_count(
+            space_id,
+            owned_open_ids,
+            model.cells,
+            adjacency,
+        )
+        if count > 1:
             split_surface_spaces += 1
             issues.append(SurfaceReadinessIssue(
                 "warning",
                 "SURFACE_SPACE_SPLIT_COMPONENTS",
-                f"Space navigation surface is split across {len(local_components)} components",
+                f"Space navigation surface is split across {count} components",
                 space_id,
             ))
 
@@ -329,6 +333,43 @@ def assess_surface_readiness(model: InavModel) -> SurfaceReadiness:
             "surface_navigation_ready": ready,
         },
     )
+
+
+def _space_surface_component_count(
+    space_id: str,
+    owned_open_ids: set[str],
+    cells: list[NavCell],
+    adjacency: dict[str, set[str]],
+) -> int:
+    """Count physically separate pieces of one semantic space.
+
+    Open landing/floor cells may be joined by a stair/ramp/escalator cell rather
+    than by another ``open`` cell. Those vertical cells are part of the same
+    walkable manifold and therefore must participate in the continuity test. An
+    unowned vertical cell is allowed as an intermediate connector; a vertical cell
+    explicitly owned by another space is not. Ordinary cells from other spaces are
+    never traversed here, so door/room topology cannot mask a genuinely split room.
+    """
+    if not owned_open_ids:
+        return 0
+
+    allowed_ids = set(owned_open_ids)
+    for cell in cells:
+        if cell.terrain not in _VERTICAL_TERRAINS:
+            continue
+        if cell.space_id is None or cell.space_id == space_id:
+            allowed_ids.add(cell.id)
+
+    local_adjacency = {
+        cell_id: {
+            neighbor_id
+            for neighbor_id in adjacency.get(cell_id, ())
+            if neighbor_id in allowed_ids
+        }
+        for cell_id in allowed_ids
+    }
+    local_components = _components(local_adjacency)
+    return sum(bool(component & owned_open_ids) for component in local_components)
 
 
 def _validate_surface_crossing(

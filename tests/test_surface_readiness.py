@@ -153,3 +153,39 @@ def test_unreachable_occupant_space_is_identified_not_only_counted() -> None:
     issue = next(issue for issue in report.issues if issue.code == "SURFACE_SPACE_CANNOT_REACH_EXIT")
     assert issue.entity_id == "isolated"
     assert "Isolated Office" in issue.message
+
+
+def test_space_continuity_can_pass_through_unowned_stair_surface() -> None:
+    lower = NavCell(
+        id="lower",
+        vertices_m=((0.0, 0.0, 0.0), (0.8, 0.0, 0.0), (0.0, 0.8, 0.0)),
+        space_id="room",
+        level_id="L1",
+        terrain="open",
+        neighbor_ids=["stair"],
+    )
+    stair = NavCell(
+        id="stair",
+        vertices_m=((0.8, 0.0, 0.0), (1.6, 0.0, 0.3), (0.8, 0.8, 0.3)),
+        terrain="stair",
+        neighbor_ids=["lower", "upper"],
+    )
+    upper = NavCell(
+        id="upper",
+        vertices_m=((1.6, 0.0, 0.3), (2.4, 0.0, 0.3), (1.6, 0.8, 0.3)),
+        space_id="room",
+        level_id="L1",
+        terrain="open",
+        neighbor_ids=["stair"],
+    )
+    model = InavModel(
+        levels=[Level("L1", "Level 1", 0.0)],
+        spaces=[Space("room", "Room", "L1")],
+        cells=[lower, stair, upper],
+    )
+
+    report = validate_model(model)
+
+    assert report.valid
+    assert report.stats["surface_split_spaces"] == 0
+    assert not any(issue.code == "SURFACE_SPACE_SPLIT_COMPONENTS" for issue in report.issues)

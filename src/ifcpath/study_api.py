@@ -14,7 +14,7 @@ from .study_service import StudyRequestError, run_study
 
 def create_app(viewer_dir: str | Path | None = None):
     try:
-        from fastapi import Body, FastAPI, Header, HTTPException
+        from fastapi import Body, FastAPI, Header, HTTPException, Response
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover - optional runtime dependency
@@ -38,6 +38,15 @@ def create_app(viewer_dir: str | Path | None = None):
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-IfcPath-Surface-Source",
+            "X-IfcPath-Qualification-Valid",
+            "X-IfcPath-Surface-Authoritative",
+            "X-IfcPath-Surface-Navigation-Ready",
+            "X-IfcPath-Surface-Unreachable-Spaces",
+            "X-IfcPath-Surface-Vertical-Transitions",
+            "X-IfcPath-Surface-Cell-Count",
+        ],
     )
 
     @app.get("/health")
@@ -64,13 +73,24 @@ def create_app(viewer_dir: str | Path | None = None):
 
     @app.post("/inav/build")
     async def build_inav(
+        response: Response,
         body: bytes = Body(..., media_type="application/octet-stream"),
         x_ifc_filename: str = Header(default="upload.ifc"),
     ) -> dict[str, Any]:
         try:
-            return build_inav_payload(body, x_ifc_filename)
+            payload = build_inav_payload(body, x_ifc_filename)
         except IfcBuildRequestError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # The full INAV payload can be several megabytes. Browser qualification
+        # previously asked Chromium DevTools to retain that entire response until
+        # Playwright later called response.json(), which can evict the body on the
+        # frozen Windows bundle even though the server completed successfully.
+        # These compact headers expose the exact physical-build invariants needed
+        # by CI while the viewer still receives the unchanged full JSON body.
+        for name, value in _physical_build_headers(payload).items():
+            response.headers[name] = value
+        return payload
 
     @app.post("/study/run")
     def run(payload: dict[str, Any]) -> dict[str, Any]:
@@ -87,12 +107,37 @@ def create_app(viewer_dir: str | Path | None = None):
                 ),
             ) from exc
 
-    # Mount last so /health, /inav/build and /study/run always win over static
-    # paths. html=True provides index.html for the local single-page viewer.
     if static_root is not None:
         app.mount("/", StaticFiles(directory=str(static_root), html=True), name="viewer")
 
     return app
+
+
+def _physical_build_headers(payload: dict[str, Any]) -> dict[str, str]:
+    model = payload.get("model") if isinstance(payload, dict) else None
+    model = model if isinstance(model, dict) else {}
+    metadata = model.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    cells = model.get("cells")
+    cells = cells if isinstance(cells, list) else []
+    qualification = payload.get("qualification") if isinstance(payload, dict) else None
+    qualification = qualification if isinstance(qualification, dict) else {}
+    stats = qualification.get("stats")
+    stats = stats if isinstance(stats, dict) else {}
+
+    return {
+        "X-IfcPath-Surface-Source": str(metadata.get("surface_source", "")),
+        "X-IfcPath-Qualification-Valid": _header_bool(qualification.get("valid")),
+        "X-IfcPath-Surface-Authoritative": _header_bool(stats.get("surface_authoritative")),
+        "X-IfcPath-Surface-Navigation-Ready": _header_bool(stats.get("surface_navigation_ready")),
+        "X-IfcPath-Surface-Unreachable-Spaces": str(stats.get("surface_exit_unreachable_spaces", -1)),
+        "X-IfcPath-Surface-Vertical-Transitions": str(stats.get("surface_vertical_transitions", 0)),
+        "X-IfcPath-Surface-Cell-Count": str(len(cells)),
+    }
+
+
+def _header_bool(value: Any) -> str:
+    return "true" if value is True else "false"
 
 
 def _resolve_viewer_dir(value: str | Path | None) -> Path | None:
@@ -103,8 +148,6 @@ def _resolve_viewer_dir(value: str | Path | None) -> Path | None:
     if env_value:
         candidates.append(Path(env_value))
     candidates.extend([
-        # Release wheels contain the prebuilt That Open app here. Keeping this
-        # first means installed users do not need the source tree or Node.js.
         Path(__file__).resolve().parent / "web_dist",
         Path.cwd() / "viewer" / "dist",
         Path(__file__).resolve().parents[2] / "viewer" / "dist",
