@@ -105,11 +105,17 @@ jobs:
         shell: pwsh
         run: |
           $ifc = Join-Path $env:RUNNER_TEMP 'Duplex_A_20110907.ifc'
+          $stdout = Join-Path $env:RUNNER_TEMP 'ifcpath-standalone.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'ifcpath-standalone.stderr.log'
           Invoke-WebRequest `
             'https://raw.githubusercontent.com/andyward/XBimDemo/master/Xbim.TestApp/Duplex_A_20110907.ifc' `
             -OutFile $ifc
           $exe = Resolve-Path 'dist/IFCPathApp/IFCPathApp.exe'
-          $process = Start-Process $exe -ArgumentList '--no-open','--port','8767' -PassThru
+          $process = Start-Process $exe `
+            -ArgumentList '--no-open','--port','8767' `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -PassThru
           try {
             $ready = $false
             for ($i = 0; $i -lt 60; $i++) {
@@ -127,6 +133,10 @@ jobs:
             Set-Location ..
           } finally {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Write-Host '--- IFCPath standalone stdout ---'
+            Get-Content $stdout -ErrorAction SilentlyContinue
+            Write-Host '--- IFCPath standalone stderr ---'
+            Get-Content $stderr -ErrorAction SilentlyContinue
           }
 
       - name: Upload browser diagnostics on failure
@@ -138,12 +148,14 @@ jobs:
           path: |
             viewer/playwright-report
             viewer/test-results
+            ${{ runner.temp }}/ifcpath-standalone.stdout.log
+            ${{ runner.temp }}/ifcpath-standalone.stderr.log
 
       - name: Assemble release archives
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release/python-bundle/dist | Out-Null
-          Copy-Item dist/ifcpath-*.whl release/python-bundle/dist/
+          Copy-Item dist/ifcpath-*.whl release/python-bundle/
           Copy-Item scripts/install_local_app.ps1 release/python-bundle/
           Copy-Item docs/LOCAL_APP.md release/python-bundle/README.md
           Compress-Archive -Path release/python-bundle/* -DestinationPath release/IfcPath-Windows-Python-Bundle.zip -Force
