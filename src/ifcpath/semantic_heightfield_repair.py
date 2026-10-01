@@ -70,7 +70,6 @@ def build_semantic_repair_regions(ifc_file) -> list[SemanticRepairRegion]:
             if not iterator.next():
                 break
 
-    # Preserve robust behaviour when the bulk iterator cannot tessellate a space.
     for entity in spaces:
         try:
             entity_id = int(entity.id())
@@ -86,10 +85,19 @@ def build_semantic_repair_regions(ifc_file) -> list[SemanticRepairRegion]:
         if region is not None:
             regions.append(region)
 
-    # Smallest containing authored space wins for malformed/nested spaces, matching
-    # the final semantic labelling rule used by surface reconstruction.
     regions.sort(key=lambda item: (item.area_m2, item.id))
     return regions
+
+
+def semantic_region_for_position(
+    regions: list[SemanticRepairRegion],
+    position,
+) -> SemanticRepairRegion | None:
+    """Return the smallest authored space containing one physical sample point."""
+    for region in regions:
+        if region.contains(position):
+            return region
+    return None
 
 
 def semantic_bridge_paths(
@@ -108,16 +116,14 @@ def semantic_bridge_paths(
     rejected_by_region: dict[str, list[_WalkableSpan]] = {region.id: [] for region in regions}
 
     for sample in accepted:
-        region = _smallest_region(regions, sample.position)
+        region = semantic_region_for_position(regions, sample.position)
         if region is not None:
             accepted_by_region[region.id].append(sample)
 
     for span in rejected:
-        # Keep vertical terrain out of room-repair logic. Stair/ramp topology is
-        # qualified independently and should not be altered by an IfcSpace floor.
         if span.terrain != "open":
             continue
-        region = _smallest_region(regions, span.position)
+        region = semantic_region_for_position(regions, span.position)
         if region is not None:
             rejected_by_region[region.id].append(span)
 
@@ -131,8 +137,6 @@ def semantic_bridge_paths(
         )
         paths.extend(room_paths)
 
-    # A span on a shared/nested boundary can theoretically appear through malformed
-    # space geometry. Deduplicate paths by their quantized coordinates.
     unique = {}
     tolerance = opts.hit_merge_tolerance_m
     scale = 1.0 / max(1e-6, tolerance)
@@ -146,13 +150,6 @@ def semantic_bridge_paths(
         unique.values(),
         key=lambda path: (len(path), [(span.ix, span.iy, span.position[2]) for span in path]),
     )
-
-
-def _smallest_region(regions, position):
-    for region in regions:
-        if region.contains(position):
-            return region
-    return None
 
 
 def _region_from_shape(ifc_file, entity_id: int, shape) -> SemanticRepairRegion | None:
