@@ -3,6 +3,12 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
+from ifcpath.heightfield_repair import rejected_bridge_groups
+from ifcpath.raycast_surface import (
+    SurfaceDetectionOptions,
+    _SupportSample,
+    _WalkableSpan,
+)
 from ifcpath.triangle_heightfield import (
     _barycentric_xy,
     _rasterize_triangle,
@@ -72,3 +78,47 @@ def test_vertical_triangle_does_not_manufacture_column_intersection():
     )
 
     assert dict(columns) == {}
+
+
+def _sample(ix: int, iy: int, z: float = 0.0) -> _SupportSample:
+    return _SupportSample(ix, iy, (float(ix), float(iy), z), 1, "open")
+
+
+def _span(ix: int, iy: int, z: float = 0.0) -> _WalkableSpan:
+    return _WalkableSpan(
+        ix=ix,
+        iy=iy,
+        position=(float(ix), float(iy), z),
+        owner_id=1,
+        terrain="open",
+        ceiling_z=None,
+        free_height_m=math.inf,
+        direct_blocked=False,
+    )
+
+
+def test_two_cell_rejected_chain_is_selected_when_it_bridges_components():
+    opts = SurfaceDetectionOptions(cell_size_m=1.0, max_climb_m=0.25)
+    accepted = [_sample(0, 0), _sample(0, 1), _sample(3, 0), _sample(3, 1)]
+    rejected = [_span(1, 0), _span(2, 0)]
+
+    groups = rejected_bridge_groups(rejected, accepted, opts)
+
+    assert len(groups) == 1
+    assert [(span.ix, span.iy) for span in groups[0]] == [(1, 0), (2, 0)]
+
+
+def test_rejected_chain_touching_only_one_component_is_not_repaired():
+    opts = SurfaceDetectionOptions(cell_size_m=1.0, max_climb_m=0.25)
+    accepted = [_sample(0, 0), _sample(0, 1)]
+    rejected = [_span(1, 0), _span(2, 0)]
+
+    assert rejected_bridge_groups(rejected, accepted, opts) == []
+
+
+def test_rejected_chain_does_not_bridge_different_storeys():
+    opts = SurfaceDetectionOptions(cell_size_m=1.0, max_climb_m=0.25)
+    accepted = [_sample(0, 0, 0.0), _sample(3, 0, 3.0)]
+    rejected = [_span(1, 0, 0.0), _span(2, 0, 0.0)]
+
+    assert rejected_bridge_groups(rejected, accepted, opts) == []
