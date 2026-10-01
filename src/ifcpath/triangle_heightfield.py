@@ -147,12 +147,14 @@ def _rasterize_columns(
     sample_keys: set[tuple[int, int]],
     opts: SurfaceDetectionOptions,
 ) -> tuple[dict[tuple[int, int], list[_RasterHit]], dict[int, object], int]:
-    """Rasterize triangle surfaces at grid-column centres.
+    """Rasterize triangle surfaces at vertical grid-column centres.
 
-    Horizontal/sloped triangle intersections provide exact interpolated Z values.
-    Near-vertical triangles are additionally voxelized as body barriers along
-    their XY projection, so thin railings/walls still participate in radius
-    erosion even when a vertical ray through a cell centre would miss the face.
+    Horizontal and sloped triangle intersections provide exact interpolated Z
+    values. A perfectly vertical triangle has zero projected XY area and is not
+    intersected by a mathematical vertical ray except for a measure-zero edge
+    coincidence, so it must not manufacture a broad column obstacle. Closed
+    solids still contribute their horizontal/sloped cap intersections exactly as
+    the previous geometry-tree vertical-ray detector did.
     """
     try:
         physical_elements = list(ifc_file.by_type("IfcElement"))
@@ -253,6 +255,10 @@ def _rasterize_triangle(
     if normal is None:
         return
 
+    projected_area2 = _projected_area2(a, b, c)
+    if abs(projected_area2) <= 1e-10:
+        return
+
     min_x = min(a[0], b[0], c[0])
     max_x = max(a[0], b[0], c[0])
     min_y = min(a[1], b[1], c[1])
@@ -262,8 +268,6 @@ def _rasterize_triangle(
     ix1 = min(grid_bounds[2], math.ceil(max_x / cell) + 1)
     iy1 = min(grid_bounds[3], math.ceil(max_y / cell) + 1)
 
-    projected_area2 = _projected_area2(a, b, c)
-    vertical = abs(projected_area2) <= 1e-10
     for ix in range(ix0, ix1 + 1):
         x = ix * cell
         for iy in range(iy0, iy1 + 1):
@@ -271,17 +275,6 @@ def _rasterize_triangle(
             if key not in sample_keys:
                 continue
             y = iy * cell
-            if vertical:
-                if _distance_to_projected_edges(x, y, a, b, c) > cell * math.sqrt(0.5) + 1e-9:
-                    continue
-                z_low = min(a[2], b[2], c[2])
-                z_high = max(a[2], b[2], c[2])
-                if z_high - z_low <= 1e-8:
-                    continue
-                columns[key].append(_RasterHit(entity_id, (x, y, z_high), normal))
-                columns[key].append(_RasterHit(entity_id, (x, y, z_low), normal))
-                continue
-
             weights = _barycentric_xy(x, y, a, b, c, projected_area2)
             if weights is None:
                 continue
@@ -317,26 +310,6 @@ def _triangle_normal(a, b, c) -> Vec3 | None:
     if length <= 1e-12:
         return None
     return tuple(value / length for value in cross)
-
-
-def _distance_to_projected_edges(x, y, a, b, c) -> float:
-    return min(
-        _distance_point_segment_xy(x, y, a, b),
-        _distance_point_segment_xy(x, y, b, c),
-        _distance_point_segment_xy(x, y, c, a),
-    )
-
-
-def _distance_point_segment_xy(x, y, a, b) -> float:
-    dx = b[0] - a[0]
-    dy = b[1] - a[1]
-    length2 = dx * dx + dy * dy
-    if length2 <= 1e-16:
-        return math.hypot(x - a[0], y - a[1])
-    t = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / length2))
-    px = a[0] + t * dx
-    py = a[1] + t * dy
-    return math.hypot(x - px, y - py)
 
 
 def _spans_from_columns(
