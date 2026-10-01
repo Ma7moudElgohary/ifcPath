@@ -17,9 +17,11 @@ test("real IFC renders and builds a physical ready INAV in the browser", async (
   await expect(html).toHaveAttribute("data-auto-inav", "ready", { timeout: 15_000 });
   await expect(html).toHaveAttribute("data-viewer-health", "ready", { timeout: 15_000 });
 
-  // Capture the server response itself, not only the UI terminal state. This
-  // prevents the packaged Windows gate from going green if /inav/build silently
-  // falls back to the legacy IfcSpace-derived surface.
+  // Capture the server response itself, not only UI state. The physical build can
+  // return a multi-megabyte INAV; Chromium may evict that body from the inspector
+  // cache before Playwright later calls response.json() on the frozen Windows app.
+  // Compact qualification headers prove the same physical invariants without
+  // retaining/decoding the large response a second time.
   const buildResponsePromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -33,30 +35,16 @@ test("real IFC renders and builds a physical ready INAV in the browser", async (
 
   const buildResponse = await buildResponsePromise;
   expect(buildResponse.ok(), `physical /inav/build failed with HTTP ${buildResponse.status()}`).toBeTruthy();
-  const payload = (await buildResponse.json()) as {
-    model?: {
-      cells?: unknown[];
-      metadata?: Record<string, unknown>;
-    };
-    qualification?: {
-      valid?: boolean;
-      stats?: Record<string, unknown>;
-    };
-  };
-  const metadata = payload.model?.metadata ?? {};
-  const qualification = payload.qualification ?? {};
-  const stats = qualification.stats ?? {};
-
-  expect(metadata.surface_source).toBe("ifc-physical-raycast");
-  expect(qualification.valid).toBe(true);
-  expect(stats.surface_authoritative).toBe(true);
-  expect(stats.surface_navigation_ready).toBe(true);
-  expect(Number(stats.surface_exit_unreachable_spaces ?? -1)).toBe(0);
-  // The packaged reference IFC is Duplex, so this also proves that the physical
-  // stair manifold survived reconstruction/finalisation instead of merely
-  // producing a flat-floor navmesh.
-  expect(Number(stats.surface_vertical_transitions ?? 0)).toBeGreaterThan(0);
-  expect(Number(payload.model?.cells?.length ?? 0)).toBeGreaterThan(1_000);
+  const headers = buildResponse.headers();
+  expect(headers["x-ifcpath-surface-source"]).toBe("ifc-physical-raycast");
+  expect(headers["x-ifcpath-qualification-valid"]).toBe("true");
+  expect(headers["x-ifcpath-surface-authoritative"]).toBe("true");
+  expect(headers["x-ifcpath-surface-navigation-ready"]).toBe("true");
+  expect(Number(headers["x-ifcpath-surface-unreachable-spaces"] ?? -1)).toBe(0);
+  // Duplex must retain a real physical stair manifold rather than merely a flat
+  // floor navmesh.
+  expect(Number(headers["x-ifcpath-surface-vertical-transitions"] ?? 0)).toBeGreaterThan(0);
+  expect(Number(headers["x-ifcpath-surface-cell-count"] ?? 0)).toBeGreaterThan(1_000);
 
   await waitForTerminalState(page, "inavBuild", 210_000);
   await waitForTerminalState(page, "ifcViewer", 210_000);
