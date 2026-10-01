@@ -16,11 +16,11 @@ from .raycast_surface import (
     SurfaceDetectionOptions,
     SurfaceDetectionStats,
     SurfaceSamplingDomain,
-    detect_ifc_walkable_cells,
     ifc_walkable_support_role,
 )
 from .surface_nav import connect_cells_by_shared_edges, surface_components
 from .surface_seams import stitch_clearance_aware_seams
+from .triangle_heightfield import detect_ifc_walkable_cells_heightfield
 
 
 @dataclass(slots=True)
@@ -59,11 +59,10 @@ def reconstruct_walkable_surface(
 ) -> SurfaceReconstructionStats:
     """Replace legacy cells with a geometry-derived physical support surface.
 
-    The detector is intentionally geometry-first. Physical IFC support elements
-    are scanned as one multi-layer field so coincident floor finishes/slabs and
-    vertical circulation do not trigger duplicate ray passes. IFC spaces are
-    consulted only after geometry reconstruction to label cells; they never
-    manufacture walkable elevation.
+    Physical IFC geometry is rasterized into a multilayer triangle heightfield,
+    then filtered for walkable support, body/head clearance, climb and radius.
+    IFC spaces are consulted only after geometry reconstruction to label cells;
+    they never manufacture walkable elevation.
 
     Adjacency is rebuilt *after* semantic labelling. This ordering is critical:
     connecting anonymous cells first and labelling them later leaves stale
@@ -108,11 +107,12 @@ def reconstruct_walkable_surface(
 
     _log_reconstruction_stage(
         "detector_start",
+        backend="triangle-heightfield",
         cell_size_m=detection_options.cell_size_m,
         radius_m=detection_options.agent_radius_m,
     )
     stage_started = perf_counter()
-    cells, detector_stats = detect_ifc_walkable_cells(
+    cells, detector_stats = detect_ifc_walkable_cells_heightfield(
         ifc_file,
         domains,
         options=detection_options,
@@ -120,6 +120,7 @@ def reconstruct_walkable_surface(
     _log_reconstruction_stage(
         "detector",
         perf_counter() - stage_started,
+        backend="triangle-heightfield",
         cells=len(cells),
         rays=detector_stats.rays,
     )
@@ -145,11 +146,6 @@ def reconstruct_walkable_surface(
         unlabelled=stats.unlabelled_cells,
     )
 
-    # The ray detector connects anonymous geometry so it can prune tiny physical
-    # patches. Those links are not semantically authoritative. Clear them now and
-    # rebuild against the final space labels so only same-space open surfaces or
-    # physical vertical terrain remain connected. Doors/open boundaries are
-    # authorised later by the portable semantic finalisation pass.
     stage_started = perf_counter()
     _clear_surface_adjacency(cells)
     connect_cells_by_shared_edges(
@@ -157,13 +153,6 @@ def reconstruct_walkable_surface(
         tolerance_m=max(1e-5, detection_options.hit_merge_tolerance_m * 0.2),
     )
 
-    # A regular sample grid can end up to one cell inside each physical support
-    # boundary, so two genuinely touching independently reconstructed supports
-    # can be separated by almost 2*cell_size in the triangulated result. The seam
-    # allowance therefore follows that geometric sampling bound. Body-clearance
-    # carving is larger around walls/railings, so this does not re-authorise a
-    # normal obstacle gap. Crucially, the unified open-floor field is never seam-
-    # healed: a missing flat sample can represent furniture or another obstacle.
     sampling_gap_m = (
         2.0 * detection_options.cell_size_m
         + detection_options.hit_merge_tolerance_m
@@ -175,9 +164,6 @@ def reconstruct_walkable_surface(
             detection_options.max_climb_m + detection_options.hit_merge_tolerance_m,
             0.10,
         ),
-        # Collision sampling has already kept the centreline one body radius from
-        # nearby geometry. A half-radius seam trim prevents a modelling gap from
-        # reintroducing a railing-edge crossing without over-shrinking narrow stairs.
         edge_clearance_m=detection_options.agent_radius_m * 0.5,
         vertical_only=True,
     )
@@ -200,6 +186,7 @@ def reconstruct_walkable_surface(
     model.metadata.update(
         {
             "surface_source": "ifc-physical-raycast",
+            "surface_detector_backend": "triangle-heightfield",
             "surface_reconstruction": stats.to_dict(),
             "surface_detector_cell_size_m": detection_options.cell_size_m,
             "surface_detector_agent_radius_m": detection_options.agent_radius_m,
