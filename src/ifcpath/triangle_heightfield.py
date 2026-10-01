@@ -34,8 +34,10 @@ from .raycast_surface import (
     ifc_walkable_support_role,
 )
 from .semantic_heightfield_repair import (
+    SemanticRepairRegion,
     build_semantic_repair_regions,
     semantic_bridge_paths,
+    semantic_region_for_position,
 )
 from .surface_nav import connect_cells_by_shared_edges
 
@@ -57,9 +59,14 @@ class _RepairTelemetry:
     candidates: int = 0
     exact_checks: int = 0
     restored: int = 0
+    headroom_candidates: int = 0
+    headroom_checks: int = 0
+    headroom_restored: int = 0
     region_seconds: float = 0.0
     tree_seconds: float = 0.0
+    headroom_seconds: float = 0.0
     exact_seconds: float = 0.0
+    tree: object | None = None
 
 
 def detect_ifc_walkable_cells_heightfield(
@@ -71,11 +78,12 @@ def detect_ifc_walkable_cells_heightfield(
 ) -> tuple[list[NavCell], SurfaceDetectionStats]:
     """Reconstruct walkable NavCells from a triangulated multilayer heightfield.
 
-    IFC geometry is rasterized once into a fast multilayer field. Agent-radius
-    erosion remains conservative. If that field splits an authored room, only a
-    short radius-rejected bridge path inside that same room is sent through the
-    previous exact OCC body-clearance test. IfcSpace therefore prioritizes exact
-    verification but never manufactures walkable geometry.
+    IFC geometry is rasterized once into a fast multilayer field. If triangle
+    rasterization disputes headroom inside an authored room, a native IFC ray is
+    used as the exact tie-breaker. Agent-radius erosion remains conservative; only
+    short rejected paths splitting the same room receive exact OCC body-clearance
+    verification. IfcSpace therefore prioritizes verification but never creates
+    walkable geometry.
     """
     opts = options or SurfaceDetectionOptions()
     stats = SurfaceDetectionStats(domains=len(domains))
@@ -123,11 +131,15 @@ def detect_ifc_walkable_cells_heightfield(
             "[ifcpath-heightfield] "
             f"stage=filter seconds={perf_counter() - stage_started:.3f} "
             f"samples={len(samples)} rejected={stats.clearance_rejections} "
+            f"headroom_candidates={repair.headroom_candidates} "
+            f"headroom_checks={repair.headroom_checks} "
+            f"headroom_restored={repair.headroom_restored} "
             f"repair_candidates={repair.candidates} "
             f"repair_checks={repair.exact_checks} "
             f"repair_restored={repair.restored} "
             f"repair_region_seconds={repair.region_seconds:.3f} "
             f"repair_tree_seconds={repair.tree_seconds:.3f} "
+            f"repair_headroom_seconds={repair.headroom_seconds:.3f} "
             f"repair_exact_seconds={repair.exact_seconds:.3f}",
             flush=True,
         )
@@ -178,7 +190,6 @@ def _rasterize_columns(
     sample_keys: set[tuple[int, int]],
     opts: SurfaceDetectionOptions,
 ) -> tuple[dict[tuple[int, int], list[_RasterHit]], dict[int, object], int]:
-    """Rasterize triangle surfaces at vertical grid-column centres."""
     try:
         physical_elements = list(ifc_file.by_type("IfcElement"))
     except Exception:
@@ -351,6 +362,10 @@ def _spans_from_columns(
     support_ids = set(domain.support_entity_ids)
     spans_by_xy: dict[tuple[int, int], list[_WalkableSpan]] = defaultdict(list)
 
+    region_started = perf_counter()
+    regions = build_semantic_repair_regions(ifc_file)
+    repair.region_seconds += perf_counter() - region_started
+
     for ix, iy in sorted(sample_keys):
         stats.rays += 1
         hits = columns.get((ix, iy), ())
@@ -402,8 +417,28 @@ def _spans_from_columns(
             )
             free_height = math.inf if ceiling_z is None else ceiling_z - candidate.position[2]
             if free_height + opts.hit_merge_tolerance_m < opts.agent_height_m:
-                stats.headroom_rejections += 1
-                continue
+                if (
+                    candidate.terrain == "open"
+                    and semantic_region_for_position(regions, candidate.position) is not None
+                ):
+                    repair.headroom_candidates += 1
+                    tree = _ensure_repair_tree(ifc_file, stats, repair)
+                    if tree is not None:
+                        repair.headroom_checks += 1
+                        check_started = perf_counter()
+                        exact_blocked = _exact_headroom_blocked(tree, candidate.position, opts)
+                        repair.headroom_seconds += perf_counter() - check_started
+                        if not exact_blocked:
+                            repair.headroom_restored += 1
+                        else:
+                            stats.headroom_rejections += 1
+                            continue
+                    else:
+                        stats.headroom_rejections += 1
+                        continue
+                else:
+                    stats.headroom_rejections += 1
+                    continue
 
             ignored_support_ids = support_ids or {item.owner_id for item in layer}
             direct_blocked = _column_body_blocked(
@@ -443,6 +478,7 @@ def _spans_from_columns(
     result = _repair_field_bottlenecks_exact(
         ifc_file,
         domain,
+        regions,
         spans_by_xy,
         result,
         opts,
@@ -457,6 +493,7 @@ def _spans_from_columns(
 def _repair_field_bottlenecks_exact(
     ifc_file,
     domain: SurfaceSamplingDomain,
+    regions: list[SemanticRepairRegion],
     spans_by_xy: dict[tuple[int, int], list[_WalkableSpan]],
     accepted: list[_SupportSample],
     opts: SurfaceDetectionOptions,
@@ -464,7 +501,7 @@ def _repair_field_bottlenecks_exact(
     classify,
     telemetry: _RepairTelemetry,
 ) -> list[_SupportSample]:
-    if opts.agent_radius_m <= 0.0 or not accepted:
+    if opts.agent_radius_m <= 0.0 or not accepted or not regions:
         return accepted
 
     accepted_keys = {
@@ -481,15 +518,8 @@ def _repair_field_bottlenecks_exact(
     if not remaining:
         return accepted
 
-    region_started = perf_counter()
-    regions = build_semantic_repair_regions(ifc_file)
-    telemetry.region_seconds += perf_counter() - region_started
-    if not regions:
-        return accepted
-
     current = list(accepted)
     checked: set[tuple[int, int, int]] = set()
-    tree = None
     support_ids = set(domain.support_entity_ids)
 
     for _ in range(_MAX_REPAIR_ROUNDS):
@@ -526,14 +556,9 @@ def _repair_field_bottlenecks_exact(
             break
         telemetry.candidates += len(candidates)
 
+        tree = _ensure_repair_tree(ifc_file, stats, telemetry)
         if tree is None:
-            tree_started = perf_counter()
-            try:
-                tree = _native_geometry_tree(ifc_file)
-                stats.used_native_tree = True
-            except Exception:
-                break
-            telemetry.tree_seconds += perf_counter() - tree_started
+            break
 
         exact_started = perf_counter()
         restored_this_round = 0
@@ -567,6 +592,48 @@ def _repair_field_bottlenecks_exact(
             break
 
     return current
+
+
+def _ensure_repair_tree(ifc_file, stats: SurfaceDetectionStats, telemetry: _RepairTelemetry):
+    if telemetry.tree is not None:
+        return telemetry.tree
+    started = perf_counter()
+    try:
+        telemetry.tree = _native_geometry_tree(ifc_file)
+        stats.used_native_tree = True
+    except Exception:
+        telemetry.tree = None
+    telemetry.tree_seconds += perf_counter() - started
+    return telemetry.tree
+
+
+def _exact_headroom_blocked(tree, position, opts: SurfaceDetectionOptions) -> bool:
+    tolerance = max(1e-4, opts.hit_merge_tolerance_m)
+    required = max(0.0, opts.agent_height_m)
+    if required <= tolerance:
+        return False
+    z = float(position[2])
+    start_z = z + tolerance
+    length = max(0.0, required - tolerance)
+    try:
+        hits = tree.select_ray(
+            (float(position[0]), float(position[1]), start_z),
+            (0.0, 0.0, 1.0),
+            length=length,
+        )
+    except Exception:
+        return True
+    for hit in hits:
+        try:
+            hit_z = float(hit.position[2])
+        except Exception:
+            continue
+        clearance = hit_z - z
+        if clearance <= tolerance:
+            continue
+        if clearance + tolerance < required:
+            return True
+    return False
 
 
 def _nearest_distinct_surface_above(index, positions, z, tolerance):
