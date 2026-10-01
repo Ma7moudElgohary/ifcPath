@@ -56,7 +56,7 @@ def test_horizontal_triangle_rasterizes_interpolated_surface_hit():
     assert math.isclose(columns[(0, 0)][0].position[2], 1.0)
 
 
-def test_vertical_triangle_voxelizes_body_barrier():
+def test_vertical_triangle_does_not_manufacture_column_intersection():
     columns = defaultdict(list)
     sample_keys = {(0, 0), (1, 0)}
 
@@ -71,6 +71,4 @@ def test_vertical_triangle_voxelizes_body_barrier():
         1.0,
     )
 
-    hits = columns[(0, 0)]
-    assert len(hits) == 2
-    assert {round(hit.position[2], 6) for hit in hits} == {0.0, 2.0}
+    assert dict(columns) == {}
