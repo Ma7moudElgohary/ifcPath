@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
@@ -150,6 +151,19 @@ def main() -> None:
     result = build_inav_payload(path.read_bytes(), path.name)
     report = result["qualification"]
     model = result.get("model", {})
+
+    # Keep the geometry-first build itself as a CI artifact. The qualification
+    # summary is intentionally strict, but when it fails we still need the exact
+    # physical cells/adjacency to diagnose where topology was cut.
+    diagnostic_model_path = Path(
+        os.environ.get("IFCPATH_PHYSICAL_MODEL_OUTPUT", "/tmp/local_app_physical.inav")
+    )
+    diagnostic_model_path.write_text(
+        json.dumps(model, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    print(f"wrote physical qualification model: {diagnostic_model_path}")
+
     stats = report.get("stats", {})
     metadata = model.get("metadata", {})
     cells = list(model.get("cells", []))
