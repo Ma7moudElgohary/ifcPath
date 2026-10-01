@@ -64,13 +64,6 @@ class SurfaceDetectionStats:
     clearance_precise_queries: int = 0
     clearance_precise_skips: int = 0
     clearance_verification_mismatches: int = 0
-    # Selective topology repair uses the exact OCC body check only where a span
-    # rejected by metric field erosion can reconnect otherwise separate regions.
-    # These counters make sure the fast path stays far below the old ~15k exact
-    # queries while remaining observable in real-IFC qualification.
-    topology_repair_candidates: int = 0
-    topology_repair_exact_checks: int = 0
-    topology_repair_restored: int = 0
     heightfield_spans: int = 0
     heightfield_direct_rejections: int = 0
     heightfield_radius_rejections: int = 0
@@ -207,6 +200,7 @@ def detect_ifc_walkable_cells(
 def _native_geometry_tree(ifc_file):
     settings = ifcopenshell.geom.settings()
     settings.set(settings.USE_WORLD_COORDS, True)
+
     try:
         physical_elements = list(ifc_file.by_type("IfcElement"))
     except Exception:
@@ -242,18 +236,16 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
     min_up = math.cos(math.radians(opts.max_slope_deg))
     support_ids = set(domain.support_entity_ids)
 
-    samples_by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
     spans_by_xy: dict[tuple[int, int], list[_WalkableSpan]] = defaultdict(list)
     sampled_xy: set[tuple[int, int]] = set()
-
     for ix in range(ix0, ix1 + 1):
         x = ix * cell
         for iy in range(iy0, iy1 + 1):
             y = iy * cell
             if domain.clip_xy is not None and not domain.clip_xy.covers(Point(x, y)):
                 continue
-            sampled_xy.add((ix, iy))
 
+            sampled_xy.add((ix, iy))
             stats.rays += 1
             hits = list(
                 tree.select_ray(
@@ -327,25 +319,6 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                     opts=opts,
                     classify=classify,
                 )
-                if direct_blocked:
-                    stats.heightfield_direct_rejections += 1
-                    stats.clearance_rejections += 1
-
-                span = _WalkableSpan(
-                    ix=ix,
-                    iy=iy,
-                    position=candidate.position,
-                    owner_id=candidate.owner_id,
-                    terrain=candidate.terrain,
-                    ceiling_z=ceiling_z,
-                    free_height_m=free_height,
-                    direct_blocked=direct_blocked,
-                )
-                _append_unique_span(
-                    spans_by_xy[(ix, iy)],
-                    span,
-                    opts.hit_merge_tolerance_m,
-                )
 
                 if opts.exact_clearance_verification:
                     exact_blocked = _body_clearance_blocked(
@@ -359,6 +332,26 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                     )
                     if exact_blocked != direct_blocked:
                         stats.clearance_verification_mismatches += 1
+                    direct_blocked = direct_blocked or exact_blocked
+
+                if direct_blocked:
+                    stats.heightfield_direct_rejections += 1
+                    stats.clearance_rejections += 1
+
+                _append_unique_span(
+                    spans_by_xy[(ix, iy)],
+                    _WalkableSpan(
+                        ix=ix,
+                        iy=iy,
+                        position=candidate.position,
+                        owner_id=candidate.owner_id,
+                        terrain=candidate.terrain,
+                        ceiling_z=ceiling_z,
+                        free_height_m=free_height,
+                        direct_blocked=direct_blocked,
+                    ),
+                    opts.hit_merge_tolerance_m,
+                )
 
     stats.heightfield_spans += sum(len(bucket) for bucket in spans_by_xy.values())
     result = _erode_walkable_spans(
@@ -371,13 +364,19 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
     return result
 
 
-def _nearest_distinct_surface_above(index, positions, z, tolerance):
+def _nearest_distinct_surface_above(index, positions, z, tolerance=0.025):
+    """Return the closest ray intersection above one support layer."""
     for upper in reversed(positions[:index]):
         delta = upper[2] - z
         if delta <= tolerance:
             continue
         return float(upper[2])
     return None
+
+
+def _headroom_blocked(index, positions, z, required_height):
+    ceiling_z = _nearest_distinct_surface_above(index, positions, z)
+    return ceiling_z is not None and ceiling_z - z < required_height
 
 
 def _column_body_blocked(
@@ -389,12 +388,10 @@ def _column_body_blocked(
     opts,
     classify,
 ):
-    if opts.agent_height_m <= 0.0:
-        return False
-
-    body_bottom = support_z + opts.hit_merge_tolerance_m
-    body_top = support_z + opts.agent_height_m
-    levels_by_entity: dict[int, list[float]] = defaultdict(list)
+    """Classify body occupancy from the already-computed vertical ray column."""
+    body_low = float(support_z) + max(opts.hit_merge_tolerance_m, 0.01)
+    body_high = float(support_z) + max(opts.agent_height_m, opts.agent_radius_m * 2.0)
+    by_entity: dict[int, list[float]] = defaultdict(list)
 
     for entity, position in zip(entities, positions):
         if entity is None:
@@ -405,96 +402,94 @@ def _column_body_blocked(
             continue
         if entity_id in ignored_entity_ids:
             continue
-        try:
-            class_name = classify(entity)
-        except Exception:
-            class_name = _entity_class(entity)
-        if class_name in _NON_BLOCKING_CLASSES:
+        if classify(entity) in _NON_BLOCKING_CLASSES:
             continue
-        z = float(position[2])
-        if z < body_bottom - opts.hit_merge_tolerance_m:
+        if not _is_physical_element(entity):
             continue
-        if z > body_top + opts.hit_merge_tolerance_m:
-            continue
-        levels_by_entity[entity_id].append(z)
+        by_entity[entity_id].append(float(position[2]))
 
-    for levels in levels_by_entity.values():
-        distinct = _distinct_levels(levels, opts.hit_merge_tolerance_m)
-        # Closed solids normally contribute paired top/bottom crossings. Pairing
-        # those intervals makes a vertical ray sufficient for body occupancy. An
-        # unmatched shell crossing inside the body is treated conservatively as a
-        # blocker rather than allowing routes through thin/open obstacle geometry.
-        for index in range(0, len(distinct) - 1, 2):
-            high = distinct[index]
-            low = distinct[index + 1]
-            if _intervals_overlap(low, high, body_bottom, body_top):
+    tolerance = max(opts.hit_merge_tolerance_m, 1e-4)
+    for z_values in by_entity.values():
+        levels = _distinct_levels(z_values, tolerance)
+        if not levels:
+            continue
+
+        pair_count = len(levels) // 2
+        for pair_index in range(pair_count):
+            high = levels[pair_index * 2]
+            low = levels[pair_index * 2 + 1]
+            if _intervals_overlap(low, high, body_low, body_high, tolerance):
                 return True
-        if len(distinct) % 2 == 1:
-            unmatched = distinct[-1]
-            if body_bottom - opts.hit_merge_tolerance_m <= unmatched <= body_top + opts.hit_merge_tolerance_m:
+
+        if len(levels) % 2:
+            lone = levels[-1]
+            if body_low - tolerance <= lone <= body_high + tolerance:
                 return True
     return False
 
 
-def _distinct_levels(levels, tolerance):
+def _distinct_levels(values, tolerance):
+    ordered = sorted((float(value) for value in values), reverse=True)
     result: list[float] = []
-    for value in sorted((float(item) for item in levels), reverse=True):
+    for value in ordered:
         if result and abs(result[-1] - value) <= tolerance:
             continue
         result.append(value)
     return result
 
 
-def _intervals_overlap(a0, a1, b0, b1):
-    low_a, high_a = sorted((float(a0), float(a1)))
-    low_b, high_b = sorted((float(b0), float(b1)))
-    return high_a >= low_b and high_b >= low_a
+def _intervals_overlap(low_a, high_a, low_b, high_b, tolerance):
+    return high_a > low_b + tolerance and low_a < high_b - tolerance
 
 
 def _erode_walkable_spans(
     spans_by_xy,
     opts,
-    stats: SurfaceDetectionStats | None = None,
+    stats=None,
+    *,
     sampled_xy=None,
 ):
-    viable_by_xy = {
-        key: [span for span in spans if not span.direct_blocked]
-        for key, spans in spans_by_xy.items()
-    }
-    viable_by_xy = {key: spans for key, spans in viable_by_xy.items() if spans}
-    sampled_xy = None if sampled_xy is None else set(sampled_xy)
-    if opts.agent_radius_m <= 0.0:
-        return [_span_to_sample(span) for spans in viable_by_xy.values() for span in spans]
+    """Apply metric, layer-aware agent-radius erosion to the span field.
 
+    Only coordinates that were actually sampled may behave as missing/blocked
+    neighbours. Coordinates outside the sampling clip are acceleration/domain
+    boundaries, not physical obstacles, and must not carve false notches into a
+    valid floor. Inside the sampled mask, a missing compatible span still acts as
+    a ledge/obstruction and is eroded normally.
+    """
+    viable_by_xy: dict[tuple[int, int], list[_WalkableSpan]] = defaultdict(list)
+    for key, bucket in spans_by_xy.items():
+        viable_by_xy[key].extend(span for span in bucket if not span.direct_blocked)
+
+    if opts.agent_radius_m <= 0.0:
+        return [
+            _span_to_sample(span)
+            for bucket in viable_by_xy.values()
+            for span in bucket
+        ]
+
+    coverage = set(spans_by_xy) if sampled_xy is None else set(sampled_xy)
     cell = max(0.05, float(opts.cell_size_m))
     radius = float(opts.agent_radius_m)
-    radius_cells = max(1, int(math.ceil(radius / cell)))
-    # A sample represents the centre of a square grid cell. Expanding by half a
-    # cell approximates distance to the occupied-cell boundary instead of distance
-    # only to neighbouring sample centres.
+    radius_cells = max(1, math.ceil(radius / cell))
     threshold = radius + cell * 0.5
-    offsets: list[tuple[int, int]] = []
-    for dx in range(-radius_cells, radius_cells + 1):
-        for dy in range(-radius_cells, radius_cells + 1):
-            if dx == 0 and dy == 0:
-                continue
-            if math.hypot(dx * cell, dy * cell) < threshold - 1e-9:
-                offsets.append((dx, dy))
+    offsets = [
+        (dx, dy)
+        for dx in range(-radius_cells, radius_cells + 1)
+        for dy in range(-radius_cells, radius_cells + 1)
+        if (dx or dy) and math.hypot(dx * cell, dy * cell) < threshold - 1e-9
+    ]
 
-    accepted: list[_SupportSample] = []
+    result: list[_SupportSample] = []
     for key in sorted(viable_by_xy):
         for span in viable_by_xy[key]:
             rejected = False
             for dx, dy in offsets:
-                neighbor_key = (span.ix + dx, span.iy + dy)
-                # A missing coordinate outside the support sampling mask is not a
-                # physical obstacle. Without this distinction, the global domain
-                # padding is eroded as if it were a wall and narrow edge regions
-                # can be severed for purely numerical reasons.
-                if sampled_xy is not None and neighbor_key not in sampled_xy:
+                neighbour_key = (span.ix + dx, span.iy + dy)
+                if neighbour_key not in coverage:
                     continue
-                neighbors = viable_by_xy.get(neighbor_key, ())
-                if any(_field_spans_compatible(span, neighbor, opts, dx, dy) for neighbor in neighbors):
+                neighbours = viable_by_xy.get(neighbour_key, ())
+                if any(_field_spans_compatible(span, neighbour, opts) for neighbour in neighbours):
                     continue
                 rejected = True
                 break
@@ -503,19 +498,19 @@ def _erode_walkable_spans(
                     stats.heightfield_radius_rejections += 1
                     stats.clearance_rejections += 1
                 continue
-            accepted.append(_span_to_sample(span))
-    return accepted
+            result.append(_span_to_sample(span))
+    return result
 
 
-def _field_spans_compatible(a, b, opts, dx=1, dy=0):
+def _field_spans_compatible(a, b, opts):
+    dx = abs(a.ix - b.ix)
+    dy = abs(a.iy - b.iy)
+    if dx == 0 and dy == 0:
+        return abs(a.position[2] - b.position[2]) <= opts.hit_merge_tolerance_m
+    horizontal = opts.cell_size_m * math.hypot(dx, dy)
     dz = abs(a.position[2] - b.position[2])
-    if dz <= opts.max_climb_m + opts.hit_merge_tolerance_m:
-        return True
-    horizontal = max(opts.cell_size_m, math.hypot(dx * opts.cell_size_m, dy * opts.cell_size_m))
     slope_limit = math.tan(math.radians(opts.max_slope_deg)) * horizontal
-    if dz <= slope_limit + opts.hit_merge_tolerance_m and (a.terrain != "open" or b.terrain != "open"):
-        return True
-    return False
+    return dz <= max(opts.max_climb_m, slope_limit) + opts.hit_merge_tolerance_m
 
 
 def _span_to_sample(span):
@@ -529,16 +524,30 @@ def _span_to_sample(span):
 
 
 def _append_unique_span(bucket, span, tolerance):
-    for existing in bucket:
-        if abs(existing.position[2] - span.position[2]) <= tolerance:
+    for existing in list(bucket):
+        if abs(existing.position[2] - span.position[2]) > tolerance:
+            continue
+        if existing.direct_blocked and not span.direct_blocked:
             return
+        if span.direct_blocked and not existing.direct_blocked:
+            bucket.remove(existing)
+            bucket.append(span)
+            return
+        if existing.terrain == "open" and span.terrain != "open":
+            bucket.remove(existing)
+            bucket.append(span)
+        return
     bucket.append(span)
 
 
 def _group_support_candidates(candidates, tolerance):
+    """Group top-face hits that describe the same physical XY/Z support layer."""
     if not candidates:
         return []
-    ordered = sorted(candidates, key=lambda item: (-item.position[2], item.hit_index, item.owner_id))
+    ordered = sorted(
+        candidates,
+        key=lambda item: (-item.position[2], item.hit_index, item.owner_id),
+    )
     groups: list[list[_SupportCandidate]] = []
     for candidate in ordered:
         if groups and abs(groups[-1][0].position[2] - candidate.position[2]) <= tolerance:
@@ -549,6 +558,7 @@ def _group_support_candidates(candidates, tolerance):
 
 
 def _preferred_support_candidate(layer):
+    """Choose one representative while preserving vertical-circulation terrain."""
     return min(
         layer,
         key=lambda item: (
@@ -558,13 +568,6 @@ def _preferred_support_candidate(layer):
             item.owner_id,
         ),
     )
-
-
-def _append_unique_sample(bucket, sample, tolerance):
-    for existing in bucket:
-        if abs(existing.position[2] - sample.position[2]) <= tolerance:
-            return
-    bucket.append(sample)
 
 
 def _body_clearance_blocked(
@@ -577,7 +580,7 @@ def _body_clearance_blocked(
     classify,
     stats: SurfaceDetectionStats | None = None,
 ):
-    """Legacy exact OCC body-clearance path retained for diagnostics only."""
+    """Legacy exact OCC clearance, retained only for diagnostic verification."""
     if opts.agent_radius_m <= 0.0:
         return False
 
@@ -592,6 +595,7 @@ def _body_clearance_blocked(
             float(position[1]),
             float(position[2] + dz),
         )
+
         broadphase = None
         try:
             if stats is not None:
@@ -650,33 +654,217 @@ def _clearance_candidate_blocks(
         return False
     if entity_id in ignored_entity_ids:
         return False
-    try:
-        class_name = classify(entity)
-    except Exception:
-        class_name = _entity_class(entity)
-    return class_name not in _NON_BLOCKING_CLASSES
+    if classify(entity) in _NON_BLOCKING_CLASSES:
+        return False
+    return _is_physical_element(entity)
 
 
-def _selected_entity(ifc_file, raw):
-    candidate = getattr(raw, "instance", raw)
-    entity_id = getattr(candidate, "id", None)
-    if callable(entity_id):
-        try:
-            entity_id = entity_id()
-        except Exception:
-            entity_id = None
-    if entity_id is None:
-        entity_id = getattr(candidate, "id", None)
-    try:
-        if entity_id is not None:
-            return ifc_file.by_id(int(entity_id))
-    except Exception:
+def _triangulate_samples(domain, samples, opts):
+    by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
+    for sample in samples:
+        by_xy[(sample.ix, sample.iy)].append(sample)
+    for bucket in by_xy.values():
+        bucket.sort(key=lambda sample: (sample.position[2], sample.owner_id))
+
+    quad_origins: set[tuple[int, int]] = set()
+    for ix, iy in by_xy:
+        for ox in (ix - 1, ix):
+            for oy in (iy - 1, iy):
+                quad_origins.add((ox, oy))
+
+    cells: list[NavCell] = []
+    created: set[tuple] = set()
+    for ix, iy in sorted(quad_origins):
+        corner_keys = (
+            (ix, iy),
+            (ix + 1, iy),
+            (ix + 1, iy + 1),
+            (ix, iy + 1),
+        )
+        buckets = [by_xy.get(key, ()) for key in corner_keys]
+        populated = [index for index, bucket in enumerate(buckets) if bucket]
+        if len(populated) < 3:
+            continue
+
+        anchor_index = populated[0]
+        for anchor in buckets[anchor_index]:
+            selected: dict[int, _SupportSample] = {anchor_index: anchor}
+            for corner_index in populated[1:]:
+                candidate = _nearest_grid_compatible(anchor, buckets[corner_index], opts)
+                if candidate is not None:
+                    selected[corner_index] = candidate
+
+            triangles = _quad_layer_triangles(selected, opts)
+            for triangle in triangles:
+                vertices = tuple(sample.position for sample in triangle)
+                key = _triangle_key(vertices, opts.hit_merge_tolerance_m)
+                if key in created or _triangle_area_3d(*vertices) <= 1e-8:
+                    continue
+                created.add(key)
+                cells.append(
+                    NavCell(
+                        id=f"cell:detected:{domain.id}:{len(cells)}",
+                        vertices_m=vertices,
+                        space_id=domain.space_id,
+                        level_id=domain.level_id,
+                        terrain=_majority_terrain(*triangle),
+                    )
+                )
+
+    connect_cells_by_shared_edges(
+        cells,
+        tolerance_m=max(1e-5, opts.hit_merge_tolerance_m * 0.2),
+    )
+    return cells
+
+
+def _quad_layer_triangles(
+    selected: dict[int, _SupportSample],
+    opts: SurfaceDetectionOptions,
+) -> list[tuple[_SupportSample, _SupportSample, _SupportSample]]:
+    if len(selected) < 3:
+        return []
+
+    if len(selected) == 3:
+        indices = tuple(sorted(selected))
+        triangle = tuple(selected[index] for index in indices)
+        return [triangle] if _triangle_samples_compatible(triangle, opts) else []
+
+    sw, se, ne, nw = (selected[index] for index in range(4))
+    diagonal_sw_ne = (
+        (sw, se, ne),
+        (sw, ne, nw),
+    )
+    diagonal_se_nw = (
+        (sw, se, nw),
+        (se, ne, nw),
+    )
+    valid_a = all(_triangle_samples_compatible(triangle, opts) for triangle in diagonal_sw_ne)
+    valid_b = all(_triangle_samples_compatible(triangle, opts) for triangle in diagonal_se_nw)
+
+    if valid_a and valid_b:
+        rise_a = abs(sw.position[2] - ne.position[2])
+        rise_b = abs(se.position[2] - nw.position[2])
+        return list(
+            diagonal_sw_ne
+            if (rise_a, sw.owner_id, ne.owner_id) <= (rise_b, se.owner_id, nw.owner_id)
+            else diagonal_se_nw
+        )
+    if valid_a:
+        return list(diagonal_sw_ne)
+    if valid_b:
+        return list(diagonal_se_nw)
+    return []
+
+
+def _triangle_samples_compatible(
+    triangle: tuple[_SupportSample, _SupportSample, _SupportSample],
+    opts: SurfaceDetectionOptions,
+) -> bool:
+    a, b, c = triangle
+    return (
+        _grid_samples_compatible(a, b, opts)
+        and _grid_samples_compatible(b, c, opts)
+        and _grid_samples_compatible(c, a, opts)
+    )
+
+
+def _nearest_grid_compatible(source, candidates, opts):
+    valid = [candidate for candidate in candidates if _grid_samples_compatible(source, candidate, opts)]
+    if not valid:
         return None
-    return None
+    return min(
+        valid,
+        key=lambda sample: (
+            abs(sample.position[2] - source.position[2]),
+            sample.owner_id,
+        ),
+    )
+
+
+def _grid_samples_compatible(a, b, opts):
+    dx = abs(a.ix - b.ix)
+    dy = abs(a.iy - b.iy)
+    if dx == 0 and dy == 0:
+        return abs(a.position[2] - b.position[2]) <= opts.hit_merge_tolerance_m
+    if dx > 1 or dy > 1:
+        return False
+    horizontal = opts.cell_size_m * math.hypot(dx, dy)
+    dz = abs(a.position[2] - b.position[2])
+    slope_limit = math.tan(math.radians(opts.max_slope_deg)) * horizontal
+    return dz <= max(opts.max_climb_m, slope_limit) + opts.hit_merge_tolerance_m
+
+
+def _prune_small_components(cells, opts):
+    if not cells:
+        return []
+    components = surface_components(cells)
+    by_id = {cell.id: cell for cell in cells}
+    kept: list[NavCell] = []
+    for component in components:
+        members = [by_id[cell_id] for cell_id in component]
+        area = sum(_triangle_area_3d(*cell.vertices_m) for cell in members)
+        if len(members) < opts.minimum_component_cells:
+            continue
+        if area + 1e-9 < opts.minimum_component_area_m2:
+            continue
+        kept.extend(members)
+    return kept
+
+
+def _nearest_compatible(source, candidates, opts):
+    valid = [candidate for candidate in candidates if _samples_compatible(source, candidate, opts)]
+    if not valid:
+        return None
+    return min(
+        valid,
+        key=lambda sample: (
+            abs(sample.position[2] - source.position[2]),
+            sample.owner_id,
+        ),
+    )
+
+
+def _samples_compatible(a, b, opts, *, diagonal=False):
+    horizontal = opts.cell_size_m * (math.sqrt(2.0) if diagonal else 1.0)
+    dz = abs(a.position[2] - b.position[2])
+    slope_limit = math.tan(math.radians(opts.max_slope_deg)) * horizontal
+    return dz <= max(opts.max_climb_m, slope_limit) + opts.hit_merge_tolerance_m
+
+
+def _append_unique_sample(bucket, sample, tolerance):
+    for existing in bucket:
+        if abs(existing.position[2] - sample.position[2]) <= tolerance:
+            if existing.terrain == "open" and sample.terrain != "open":
+                bucket.remove(existing)
+                bucket.append(sample)
+            return
+    bucket.append(sample)
 
 
 def _hit_entity(ifc_file, hit):
-    return _selected_entity(ifc_file, getattr(hit, "instance", hit))
+    instance = getattr(hit, "instance", None)
+    if instance is None:
+        return None
+    try:
+        return ifc_file.by_id(int(instance.id()))
+    except Exception:
+        return None
+
+
+def _selected_entity(ifc_file, raw):
+    instance = getattr(raw, "instance", raw)
+    try:
+        return ifc_file.by_id(int(instance.id()))
+    except Exception:
+        return None
+
+
+def _is_physical_element(entity):
+    try:
+        return bool(entity.is_a("IfcElement"))
+    except Exception:
+        return False
 
 
 def _entity_class(entity):
@@ -693,118 +881,27 @@ def _safe_attr(entity, name, default=None):
         return default
 
 
-def _triangulate_samples(domain, samples, opts):
-    by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
+def _majority_terrain(*samples):
+    counts: dict[str, int] = defaultdict(int)
     for sample in samples:
-        by_xy[(sample.ix, sample.iy)].append(sample)
-    for bucket in by_xy.values():
-        bucket.sort(key=lambda sample: sample.position[2])
-
-    cells: list[NavCell] = []
-    counter = 0
-    keys = sorted(by_xy)
-    for ix, iy in keys:
-        corners = [
-            by_xy.get((ix, iy), []),
-            by_xy.get((ix + 1, iy), []),
-            by_xy.get((ix + 1, iy + 1), []),
-            by_xy.get((ix, iy + 1), []),
-        ]
-        for combo in _quad_layers(corners, opts):
-            present = [index for index, sample in enumerate(combo) if sample is not None]
-            if len(present) < 3:
-                continue
-            terrain = _preferred_terrain(sample.terrain for sample in combo if sample is not None)
-            if len(present) == 4:
-                triangles = ((0, 1, 2), (0, 2, 3))
-            else:
-                triangles = (tuple(present),)
-            for tri in triangles:
-                triangle_samples = [combo[index] for index in tri]
-                if any(sample is None for sample in triangle_samples):
-                    continue
-                vertices = tuple(sample.position for sample in triangle_samples)
-                cells.append(
-                    NavCell(
-                        id=f"cell:detected:{domain.id}:{counter}",
-                        vertices_m=vertices,
-                        space_id=domain.space_id,
-                        level_id=domain.level_id,
-                        terrain=terrain,
-                    )
-                )
-                counter += 1
-    return cells
+        counts[sample.terrain] += 1
+    return max(counts, key=lambda terrain: (counts[terrain], terrain != "open", terrain))
 
 
-def _quad_layers(corners, opts):
-    seeds = [sample for bucket in corners for sample in bucket]
-    groups: list[list[_SupportSample | None]] = []
-    used: set[tuple[int, int, int]] = set()
-    for seed in seeds:
-        key = (seed.ix, seed.iy, seed.owner_id)
-        if key in used:
-            continue
-        combo: list[_SupportSample | None] = []
-        for bucket in corners:
-            match = _nearest_compatible_sample(seed, bucket, opts)
-            combo.append(match)
-            if match is not None:
-                used.add((match.ix, match.iy, match.owner_id))
-        if sum(item is not None for item in combo) >= 3:
-            groups.append(combo)
-    return groups
-
-
-def _nearest_compatible_sample(seed, bucket, opts):
-    compatible = [
-        item
-        for item in bucket
-        if _samples_compatible(seed, item, opts)
-    ]
-    if not compatible:
-        return None
-    return min(compatible, key=lambda item: abs(item.position[2] - seed.position[2]))
-
-
-def _samples_compatible(a, b, opts):
-    dz = abs(a.position[2] - b.position[2])
-    horizontal = max(opts.cell_size_m, math.hypot(a.position[0] - b.position[0], a.position[1] - b.position[1]))
-    if dz <= opts.max_climb_m + opts.hit_merge_tolerance_m:
-        return True
-    slope_limit = math.tan(math.radians(opts.max_slope_deg)) * horizontal
-    return dz <= slope_limit + opts.hit_merge_tolerance_m and (a.terrain != "open" or b.terrain != "open")
-
-
-def _preferred_terrain(terrains):
-    priority = {"stair": 0, "ramp": 1, "escalator": 2, "open": 3}
-    return min((str(item) for item in terrains), key=lambda item: priority.get(item, 99), default="open")
-
-
-def _prune_small_components(cells, opts):
-    if not cells:
-        return []
-    connect_cells_by_shared_edges(
-        cells,
-        tolerance_m=max(1e-5, opts.hit_merge_tolerance_m * 0.2),
+def _triangle_key(vertices, tolerance_m=1e-5):
+    scale = 1.0 / max(tolerance_m, 1e-6)
+    quantized = sorted(
+        tuple(round(value * scale) for value in vertex)
+        for vertex in vertices
     )
-    components = surface_components(cells)
-    if len(components) <= 1:
-        return cells
-    by_id = {cell.id: cell for cell in cells}
-    keep: set[str] = set()
-    for component in components:
-        if len(component) >= opts.minimum_component_cells:
-            keep.update(component)
-            continue
-        area = sum(_triangle_area(by_id[cell_id]) for cell_id in component)
-        if area >= opts.minimum_component_area_m2:
-            keep.update(component)
-    return [cell for cell in cells if cell.id in keep]
+    return tuple(quantized)
 
 
-def _triangle_area(cell):
-    a, b, c = cell.vertices_m
+def _cell_geometry_key(cell, tolerance_m):
+    return _triangle_key(cell.vertices_m, tolerance_m)
+
+
+def _triangle_area_3d(a, b, c):
     ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
     ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
     cross = (
@@ -813,13 +910,3 @@ def _triangle_area(cell):
         ab[0] * ac[1] - ab[1] * ac[0],
     )
     return 0.5 * math.sqrt(sum(value * value for value in cross))
-
-
-def _cell_geometry_key(cell, tolerance):
-    scale = 1.0 / max(1e-6, tolerance)
-    return tuple(
-        sorted(
-            tuple(round(value * scale) for value in vertex)
-            for vertex in cell.vertices_m
-        )
-    )
