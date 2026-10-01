@@ -120,6 +120,32 @@ def test_span_field_erosion_rejects_sample_beside_blocked_column():
     assert stats.heightfield_radius_rejections > 0
 
 
+def test_unsampled_domain_boundary_does_not_erode_walkable_span():
+    opts = SurfaceDetectionOptions(cell_size_m=0.15, agent_radius_m=0.22)
+    spans = {(0, 0): [_span(0, 0)]}
+
+    result = _erode_walkable_spans(
+        spans,
+        opts,
+        sampled_xy={(0, 0)},
+    )
+
+    assert [(sample.ix, sample.iy) for sample in result] == [(0, 0)]
+
+
+def test_sampled_empty_column_erodes_adjacent_walkable_span():
+    opts = SurfaceDetectionOptions(cell_size_m=0.15, agent_radius_m=0.22)
+    spans = {(0, 0): [_span(0, 0)]}
+
+    result = _erode_walkable_spans(
+        spans,
+        opts,
+        sampled_xy={(0, 0), (1, 0)},
+    )
+
+    assert result == []
+
+
 def test_span_field_erosion_does_not_mix_storeys():
     opts = SurfaceDetectionOptions(cell_size_m=0.15, agent_radius_m=0.22)
     spans = {}
