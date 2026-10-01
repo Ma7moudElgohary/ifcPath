@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import perf_counter
 from typing import Any
 
 from .exporter import model_from_dict
@@ -13,6 +14,12 @@ from .validation import validate_model
 
 class IfcBuildRequestError(ValueError):
     """Raised when an uploaded IFC cannot be accepted by the local app."""
+
+
+def _log_build_stage(name: str, seconds: float, **details: object) -> None:
+    detail_text = " ".join(f"{key}={value}" for key, value in sorted(details.items()))
+    suffix = f" {detail_text}" if detail_text else ""
+    print(f"[ifcpath-build] stage={name} seconds={seconds:.3f}{suffix}", flush=True)
 
 
 def build_inav_payload(
@@ -45,6 +52,8 @@ def build_inav_payload(
     safe_name = Path(filename or "upload.ifc").name
     suffix = Path(safe_name).suffix if Path(safe_name).suffix.lower() == ".ifc" else ".ifc"
     temp_path: Path | None = None
+    build_started = perf_counter()
+    stage_seconds: dict[str, float] = {}
     try:
         with NamedTemporaryFile(prefix="ifcpath-upload-", suffix=suffix, delete=False) as stream:
             stream.write(data)
@@ -52,7 +61,18 @@ def build_inav_payload(
 
         resolved_options = options or BuildOptions()
         surface_cell_size_m = min(max(resolved_options.stair_spacing_m, 0.10), 0.20)
+
+        stage_started = perf_counter()
         raw_model = build_from_ifc(temp_path, resolved_options)
+        stage_seconds["legacy_import"] = perf_counter() - stage_started
+        _log_build_stage(
+            "legacy_import",
+            stage_seconds["legacy_import"],
+            cells=len(raw_model.cells),
+            spaces=len(raw_model.spaces),
+        )
+
+        stage_started = perf_counter()
         surface_stats = reconstruct_walkable_surface(
             temp_path,
             raw_model,
@@ -65,6 +85,16 @@ def build_inav_payload(
             max_slope_deg=resolved_options.max_slope_deg,
             max_climb_m=0.24,
         )
+        stage_seconds["physical_reconstruction"] = perf_counter() - stage_started
+        _log_build_stage(
+            "physical_reconstruction",
+            stage_seconds["physical_reconstruction"],
+            cells=len(raw_model.cells),
+            replaced=surface_stats.replaced_legacy_surface,
+            supports=surface_stats.support_elements,
+        )
+
+        stage_started = perf_counter()
         if surface_stats.replaced_legacy_surface:
             # Grid/BRep intersections can leave tiny detached triangles inside a
             # correctly labelled room. Before semantic binding, authored portal
@@ -79,18 +109,33 @@ def build_inav_payload(
                 "removed_cells": fragment_stats.removed_cells,
                 "removed_components": fragment_stats.removed_components,
                 "protected_vertical_components": fragment_stats.protected_vertical_components,
-                "protected_bound_portal_components": fragment_stats.protected_bound_portal_components,
+                "protected_bound_portal_components": fragment_stats.protected_bound_portals,
                 "protected_portal_proximity_components": fragment_stats.protected_portal_proximity_components,
             }
             raw_model.metadata["cell_count"] = len(raw_model.cells)
         else:
             raw_model.metadata["surface_reconstruction"] = surface_stats.to_dict()
             raw_model.metadata.setdefault("surface_source", "legacy-qualified-fallback")
+        stage_seconds["prebind_fragment_pruning"] = perf_counter() - stage_started
+        _log_build_stage(
+            "prebind_fragment_pruning",
+            stage_seconds["prebind_fragment_pruning"],
+            cells=len(raw_model.cells),
+        )
 
         # First semantic pass binds real door/open-boundary crossings and derives
         # vertical resources from the reconstructed physical manifold.
+        stage_started = perf_counter()
         model = model_from_dict(raw_model.to_dict())
+        stage_seconds["semantic_finalization"] = perf_counter() - stage_started
+        _log_build_stage(
+            "semantic_finalization",
+            stage_seconds["semantic_finalization"],
+            cells=len(model.cells),
+            transitions=len(model.transitions),
+        )
 
+        stage_started = perf_counter()
         if surface_stats.replaced_legacy_surface:
             # Now that portal_ids are authoritative, portal *proximity* alone is no
             # longer a reason to retain a tiny island. This second conservative pass
@@ -108,7 +153,7 @@ def build_inav_payload(
                 "removed_cells": post_stats.removed_cells,
                 "removed_components": post_stats.removed_components,
                 "protected_vertical_components": post_stats.protected_vertical_components,
-                "protected_bound_portal_components": post_stats.protected_bound_portal_components,
+                "protected_bound_portal_components": post_stats.protected_bound_portals,
                 "protected_portal_proximity_components": post_stats.protected_portal_proximity_components,
             }
             model.metadata["cell_count"] = len(model.cells)
@@ -117,10 +162,31 @@ def build_inav_payload(
                 # boundary and surface-vertical semantics are rebuilt against the
                 # cleaned authoritative cell set.
                 model = model_from_dict(model.to_dict())
+        stage_seconds["postbind_cleanup"] = perf_counter() - stage_started
+        _log_build_stage(
+            "postbind_cleanup",
+            stage_seconds["postbind_cleanup"],
+            cells=len(model.cells),
+        )
 
         model.metadata["source_ifc"] = safe_name
         model.metadata["source"] = "local-app-upload"
+
+        stage_started = perf_counter()
         report = validate_model(model)
+        stage_seconds["validation"] = perf_counter() - stage_started
+        _log_build_stage(
+            "validation",
+            stage_seconds["validation"],
+            valid=report.valid,
+        )
+
+        stage_seconds["total"] = perf_counter() - build_started
+        model.metadata["build_stage_seconds"] = {
+            key: round(value, 6)
+            for key, value in stage_seconds.items()
+        }
+        _log_build_stage("total", stage_seconds["total"], cells=len(model.cells))
         return {
             "model": model.to_dict(),
             "qualification": report.to_dict(),
