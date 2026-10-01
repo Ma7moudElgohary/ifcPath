@@ -11,6 +11,7 @@ from shapely.geometry import Point, box
 from shapely.ops import unary_union
 
 from .cdt import space_floor_polygon
+from .exact_surface_seams import stitch_exact_verified_open_seams
 from .model import InavModel, NavCell
 from .raycast_surface import (
     SurfaceDetectionOptions,
@@ -32,6 +33,9 @@ class SurfaceReconstructionStats:
     unlabelled_cells: int = 0
     component_count: int = 0
     seam_count: int = 0
+    exact_seam_count: int = 0
+    exact_seam_body_checks: int = 0
+    exact_seam_support_rays: int = 0
     detector: SurfaceDetectionStats | None = None
     fallback_reason: str | None = None
 
@@ -167,6 +171,22 @@ def reconstruct_walkable_surface(
         edge_clearance_m=detection_options.agent_radius_m * 0.5,
         vertical_only=True,
     )
+
+    # A fast heightfield may quantize a physically clear narrow neck into a short
+    # empty band. Do not heal open-floor gaps by proximity alone. For split cells
+    # belonging to the same authored room, exact native support rays and OCC body
+    # clearance must validate the entire crossing before an internal seam exists.
+    exact_seams = stitch_exact_verified_open_seams(
+        ifc_file,
+        cells,
+        options=detection_options,
+        max_gap_m=max(0.45, 4.0 * detection_options.cell_size_m + 0.05),
+    )
+    stats.exact_seam_count = exact_seams.seams_added
+    stats.exact_seam_body_checks = exact_seams.exact_body_checks
+    stats.exact_seam_support_rays = exact_seams.support_rays
+    stats.seam_count += exact_seams.seams_added
+
     components = surface_components(cells)
     stats.component_count = len(components)
     _log_reconstruction_stage(
@@ -174,6 +194,13 @@ def reconstruct_walkable_surface(
         perf_counter() - stage_started,
         components=stats.component_count,
         seams=stats.seam_count,
+        exact_seams=stats.exact_seam_count,
+        exact_body_checks=stats.exact_seam_body_checks,
+        exact_support_rays=stats.exact_seam_support_rays,
+        exact_candidates=exact_seams.candidate_crossings,
+        exact_rejected_support=exact_seams.rejected_support,
+        exact_rejected_clearance=exact_seams.rejected_clearance,
+        exact_rejected_semantic=exact_seams.rejected_semantic_path,
     )
 
     if model.spaces and stats.labelled_cells == 0:
