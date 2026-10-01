@@ -47,6 +47,9 @@ class SurfaceDetectionOptions:
     hit_merge_tolerance_m: float = 0.025
     minimum_component_cells: int = 2
     minimum_component_area_m2: float = 0.08
+    # Diagnostic escape hatch only. The normal path uses the Recast-style span
+    # field and does not perform thousands of expensive OCC sphere selections.
+    exact_clearance_verification: bool = False
 
 
 @dataclass(slots=True)
@@ -60,6 +63,10 @@ class SurfaceDetectionStats:
     clearance_broadphase_queries: int = 0
     clearance_precise_queries: int = 0
     clearance_precise_skips: int = 0
+    clearance_verification_mismatches: int = 0
+    heightfield_spans: int = 0
+    heightfield_direct_rejections: int = 0
+    heightfield_radius_rejections: int = 0
     headroom_rejections: int = 0
     samples: int = 0
     cells_before_pruning: int = 0
@@ -87,6 +94,26 @@ class _SupportCandidate:
     terrain: str
 
 
+@dataclass(frozen=True, slots=True)
+class _WalkableSpan:
+    """One physical support layer in a sampled XY column.
+
+    The span field is reconstruction machinery only. Final routing still uses
+    continuous triangulated NavCells. ``direct_blocked`` means physical geometry
+    occupies the pedestrian body interval at this XY location; neighbouring
+    spans then apply metric agent-radius erosion without OCC sphere selections.
+    """
+
+    ix: int
+    iy: int
+    position: Vec3
+    owner_id: int
+    terrain: str
+    ceiling_z: float | None
+    free_height_m: float
+    direct_blocked: bool = False
+
+
 # Door/opening geometry represents an authorised aperture rather than an
 # obstruction. IfcSpace is spatial semantics, not a collision body. Windows are
 # intentionally *not* exempt: low/full-height glazing is a real barrier.
@@ -98,13 +125,7 @@ _NON_BLOCKING_CLASSES = {
 
 
 def ifc_walkable_support_role(entity) -> str | None:
-    """Map IFC semantics to a physical walkable-support role.
-
-    This mirrors the useful part of mature BIM-to-egress importers: slabs,
-    flooring, ramps, stairs/escalators and moving walkways may contribute
-    support surfaces; ordinary IfcElement instances are obstructions instead.
-    It is intentionally small and schema-stable rather than a filename heuristic.
-    """
+    """Map IFC semantics to a physical walkable-support role."""
     class_name = _entity_class(entity)
     upper = class_name.upper()
     predefined = str(_safe_attr(entity, "PredefinedType", "") or "").upper()
@@ -133,17 +154,10 @@ def detect_ifc_walkable_cells(
 ) -> tuple[list[NavCell], SurfaceDetectionStats]:
     """Detect a human-walkable support manifold from physical IFC geometry.
 
-    The build follows the movement constraints used by Recast/Pathfinder-style
-    navigation generation while retaining IfcPath's renderer-independent
-    continuous NavCell representation:
-
-    * vertical rays identify top support faces from *support* IFC elements;
-    * face slope and max step/climb limit traversability;
-    * all other physical IFC elements carve head/body clearance;
-    * neighbouring samples are connected only when the support is traversable;
-    * tiny disconnected patches are discarded;
-    * the surviving multi-layer field is triangulated into continuous NavCells.
-
+    Vertical IFC rays build a multilayer span field. Support semantics and slope
+    determine candidate walking layers; physical ray intervals determine body
+    occupancy and headroom; metric erosion applies agent radius per compatible
+    height layer. The surviving field is triangulated into continuous NavCells.
     IFC spaces can label/clip a domain, but they never manufacture walkable Z.
     """
     opts = options or SurfaceDetectionOptions()
@@ -192,9 +206,6 @@ def _native_geometry_tree(ifc_file):
     settings = ifcopenshell.geom.settings()
     settings.set(settings.USE_WORLD_COORDS, True)
 
-    # Navigation collision only needs physical IFC elements. Excluding spatial
-    # containers, annotations and other non-elements keeps the OpenCASCADE tree
-    # smaller without removing any support or obstruction geometry.
     try:
         physical_elements = list(ifc_file.by_type("IfcElement"))
     except Exception:
@@ -230,7 +241,7 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
     min_up = math.cos(math.radians(opts.max_slope_deg))
     support_ids = set(domain.support_entity_ids)
 
-    samples_by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
+    spans_by_xy: dict[tuple[int, int], list[_WalkableSpan]] = defaultdict(list)
     for ix in range(ix0, ix1 + 1):
         x = ix * cell
         for iy in range(iy0, iy1 + 1):
@@ -250,20 +261,17 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                 continue
             hits.sort(key=lambda hit: float(hit.distance))
             positions = [tuple(float(value) for value in hit.position) for hit in hits]
+            entities = [_hit_entity(ifc_file, hit) for hit in hits]
 
-            # A downward ray may hit both top and bottom faces of a slab. Gather
-            # one top-face candidate per support entity first. Real BIMs commonly
-            # model one physical walking layer several times (structural slab +
-            # finish + stair component). Clearance depends on the physical layer,
-            # not on how many IFC objects describe it, so coincident elevations
-            # are collapsed before the expensive OpenCASCADE body-clearance pass.
+            # Gather support candidates, then collapse duplicate slab/finish/etc.
+            # representations before any clearance work.
             seen_supports: set[int] = set()
             candidates: list[_SupportCandidate] = []
             for index, hit in enumerate(hits):
                 position = positions[index]
                 if position[2] < z0 - opts.vertical_padding_m or position[2] > z1 + opts.vertical_padding_m:
                     continue
-                entity = _hit_entity(ifc_file, hit)
+                entity = entities[index]
                 if entity is None:
                     continue
                 try:
@@ -296,43 +304,248 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                 stats.candidate_layers += 1
                 stats.deduplicated_candidate_hits += max(0, len(layer) - 1)
                 candidate = _preferred_support_candidate(layer)
-                if _headroom_blocked(
+                ceiling_z = _nearest_distinct_surface_above(
                     candidate.hit_index,
                     positions,
                     candidate.position[2],
-                    opts.agent_height_m,
-                ):
+                    opts.hit_merge_tolerance_m,
+                )
+                free_height = math.inf if ceiling_z is None else ceiling_z - candidate.position[2]
+                if free_height + opts.hit_merge_tolerance_m < opts.agent_height_m:
                     stats.headroom_rejections += 1
                     continue
 
                 ignored_support_ids = support_ids or {item.owner_id for item in layer}
-                if _body_clearance_blocked(
-                    tree,
-                    ifc_file,
+                direct_blocked = _column_body_blocked(
+                    entities,
+                    positions,
                     ignored_entity_ids=ignored_support_ids,
-                    position=candidate.position,
+                    support_z=candidate.position[2],
                     opts=opts,
                     classify=classify,
-                    stats=stats,
-                ):
-                    stats.clearance_rejections += 1
-                    continue
+                )
 
-                _append_unique_sample(
-                    samples_by_xy[(ix, iy)],
-                    _SupportSample(
+                if opts.exact_clearance_verification:
+                    exact_blocked = _body_clearance_blocked(
+                        tree,
+                        ifc_file,
+                        ignored_entity_ids=ignored_support_ids,
+                        position=candidate.position,
+                        opts=opts,
+                        classify=classify,
+                        stats=stats,
+                    )
+                    if exact_blocked != direct_blocked:
+                        stats.clearance_verification_mismatches += 1
+                    # Verification mode stays conservative: a disagreement cannot
+                    # manufacture walkable space while the field is being tuned.
+                    direct_blocked = direct_blocked or exact_blocked
+
+                if direct_blocked:
+                    stats.heightfield_direct_rejections += 1
+                    stats.clearance_rejections += 1
+
+                _append_unique_span(
+                    spans_by_xy[(ix, iy)],
+                    _WalkableSpan(
                         ix=ix,
                         iy=iy,
                         position=candidate.position,
                         owner_id=candidate.owner_id,
                         terrain=candidate.terrain,
+                        ceiling_z=ceiling_z,
+                        free_height_m=free_height,
+                        direct_blocked=direct_blocked,
                     ),
                     opts.hit_merge_tolerance_m,
                 )
 
-    result = [sample for bucket in samples_by_xy.values() for sample in bucket]
+    stats.heightfield_spans += sum(len(bucket) for bucket in spans_by_xy.values())
+    result = _erode_walkable_spans(spans_by_xy, opts, stats)
     stats.samples += len(result)
     return result
+
+
+def _nearest_distinct_surface_above(index, positions, z, tolerance=0.025):
+    """Return the closest ray intersection above one support layer."""
+    for upper in reversed(positions[:index]):
+        delta = upper[2] - z
+        if delta <= tolerance:
+            continue
+        return float(upper[2])
+    return None
+
+
+def _headroom_blocked(index, positions, z, required_height):
+    ceiling_z = _nearest_distinct_surface_above(index, positions, z)
+    return ceiling_z is not None and ceiling_z - z < required_height
+
+
+def _column_body_blocked(
+    entities,
+    positions,
+    *,
+    ignored_entity_ids,
+    support_z,
+    opts,
+    classify,
+):
+    """Classify body occupancy from the already-computed vertical ray column.
+
+    Recast rasterizes geometry into vertical spans and performs clearance on the
+    resulting field. Here IFC/OCC ray intersections provide the equivalent span
+    boundaries. Hits belonging to the same physical element are paired into
+    solid vertical intervals; if one overlaps the pedestrian body interval, the
+    support span is directly blocked. No additional OCC select() call is needed.
+    """
+    body_low = float(support_z) + max(opts.hit_merge_tolerance_m, 0.01)
+    body_high = float(support_z) + max(opts.agent_height_m, opts.agent_radius_m * 2.0)
+    by_entity: dict[int, list[float]] = defaultdict(list)
+
+    for entity, position in zip(entities, positions):
+        if entity is None:
+            continue
+        try:
+            entity_id = int(entity.id())
+        except Exception:
+            continue
+        if entity_id in ignored_entity_ids:
+            continue
+        if classify(entity) in _NON_BLOCKING_CLASSES:
+            continue
+        if not _is_physical_element(entity):
+            continue
+        by_entity[entity_id].append(float(position[2]))
+
+    tolerance = max(opts.hit_merge_tolerance_m, 1e-4)
+    for z_values in by_entity.values():
+        levels = _distinct_levels(z_values, tolerance)
+        if not levels:
+            continue
+
+        # Ray intersections of closed solids normally arrive as top/bottom pairs.
+        # Pair them in descending order so a wall/column occupying the full body
+        # height is detected even when neither face lies near chest height.
+        pair_count = len(levels) // 2
+        for pair_index in range(pair_count):
+            high = levels[pair_index * 2]
+            low = levels[pair_index * 2 + 1]
+            if _intervals_overlap(low, high, body_low, body_high, tolerance):
+                return True
+
+        # Degenerate/open shells can expose an unmatched surface. Treat an
+        # unmatched hit inside the body interval conservatively as blocking.
+        if len(levels) % 2:
+            lone = levels[-1]
+            if body_low - tolerance <= lone <= body_high + tolerance:
+                return True
+    return False
+
+
+def _distinct_levels(values, tolerance):
+    ordered = sorted((float(value) for value in values), reverse=True)
+    result: list[float] = []
+    for value in ordered:
+        if result and abs(result[-1] - value) <= tolerance:
+            continue
+        result.append(value)
+    return result
+
+
+def _intervals_overlap(low_a, high_a, low_b, high_b, tolerance):
+    return high_a > low_b + tolerance and low_a < high_b - tolerance
+
+
+def _erode_walkable_spans(spans_by_xy, opts, stats=None):
+    """Apply agent-radius clearance to the multilayer span field.
+
+    Erosion is metric in XY and layer-aware in Z. A blocked/missing neighbour
+    only affects a span when no vertically compatible walkable span exists at
+    that neighbour, so obstacles on another storey do not erode this storey.
+    Stair runs remain compatible through normal tread/riser height changes.
+    """
+    viable_by_xy: dict[tuple[int, int], list[_WalkableSpan]] = defaultdict(list)
+    for key, bucket in spans_by_xy.items():
+        viable_by_xy[key].extend(span for span in bucket if not span.direct_blocked)
+
+    if opts.agent_radius_m <= 0.0:
+        return [
+            _span_to_sample(span)
+            for bucket in viable_by_xy.values()
+            for span in bucket
+        ]
+
+    cell = max(0.05, float(opts.cell_size_m))
+    radius = float(opts.agent_radius_m)
+    radius_cells = max(1, math.ceil(radius / cell))
+    # A blocked grid cell represents an area around its centre, not a zero-area
+    # point. Expanding by half a cell approximates distance to that cell boundary
+    # while keeping Euclidean rather than Manhattan/square-grid erosion.
+    threshold = radius + cell * 0.5
+    offsets = [
+        (dx, dy)
+        for dx in range(-radius_cells, radius_cells + 1)
+        for dy in range(-radius_cells, radius_cells + 1)
+        if (dx or dy) and math.hypot(dx * cell, dy * cell) < threshold - 1e-9
+    ]
+
+    result: list[_SupportSample] = []
+    for key in sorted(viable_by_xy):
+        for span in viable_by_xy[key]:
+            rejected = False
+            for dx, dy in offsets:
+                neighbours = viable_by_xy.get((span.ix + dx, span.iy + dy), ())
+                if any(_field_spans_compatible(span, neighbour, opts) for neighbour in neighbours):
+                    continue
+                rejected = True
+                break
+            if rejected:
+                if stats is not None:
+                    stats.heightfield_radius_rejections += 1
+                    stats.clearance_rejections += 1
+                continue
+            result.append(_span_to_sample(span))
+    return result
+
+
+def _field_spans_compatible(a, b, opts):
+    dx = abs(a.ix - b.ix)
+    dy = abs(a.iy - b.iy)
+    if dx == 0 and dy == 0:
+        return abs(a.position[2] - b.position[2]) <= opts.hit_merge_tolerance_m
+    horizontal = opts.cell_size_m * math.hypot(dx, dy)
+    dz = abs(a.position[2] - b.position[2])
+    slope_limit = math.tan(math.radians(opts.max_slope_deg)) * horizontal
+    return dz <= max(opts.max_climb_m, slope_limit) + opts.hit_merge_tolerance_m
+
+
+def _span_to_sample(span):
+    return _SupportSample(
+        ix=span.ix,
+        iy=span.iy,
+        position=span.position,
+        owner_id=span.owner_id,
+        terrain=span.terrain,
+    )
+
+
+def _append_unique_span(bucket, span, tolerance):
+    for existing in list(bucket):
+        if abs(existing.position[2] - span.position[2]) > tolerance:
+            continue
+        # A duplicate physical layer is blocked if any coincident representation
+        # says it is blocked; otherwise preserve the most informative terrain.
+        if existing.direct_blocked and not span.direct_blocked:
+            return
+        if span.direct_blocked and not existing.direct_blocked:
+            bucket.remove(existing)
+            bucket.append(span)
+            return
+        if existing.terrain == "open" and span.terrain != "open":
+            bucket.remove(existing)
+            bucket.append(span)
+        return
+    bucket.append(span)
 
 
 def _group_support_candidates(candidates, tolerance):
@@ -365,18 +578,6 @@ def _preferred_support_candidate(layer):
     )
 
 
-def _headroom_blocked(index, positions, z, required_height):
-    # Rays travel downwards, therefore earlier intersections are above this
-    # support. Ignore coincident shell/finish faces and use the nearest distinct
-    # surface as the ceiling/overhang bound.
-    for upper in reversed(positions[:index]):
-        delta = upper[2] - z
-        if delta <= 0.025:
-            continue
-        return delta < required_height
-    return False
-
-
 def _body_clearance_blocked(
     tree,
     ifc_file,
@@ -387,14 +588,10 @@ def _body_clearance_blocked(
     classify,
     stats: SurfaceDetectionStats | None = None,
 ):
+    """Legacy exact OCC clearance, retained only for diagnostic verification."""
     if opts.agent_radius_m <= 0.0:
         return False
 
-    # Approximate the upright pedestrian cylinder with overlapping exact sphere
-    # queries. Before invoking OpenCASCADE's expensive precise geometry test, use
-    # its UB-tree bounding-box query as a conservative broad phase. Any geometry
-    # intersecting the exact sphere must also intersect that sphere's AABB, so an
-    # empty/non-blocking box result can safely skip the precise query.
     low = max(opts.agent_radius_m, 0.20)
     top = max(low, opts.agent_height_m - opts.agent_radius_m)
     heights = {low, min(top, max(0.70, opts.agent_height_m * 0.50)), top}
@@ -413,8 +610,6 @@ def _body_clearance_blocked(
                 stats.clearance_broadphase_queries += 1
             broadphase = tree.select_box(center, extend=radius)
         except Exception:
-            # Older/alternate geometry-tree backends may not support dilating a
-            # point query. Falling back to the exact query preserves correctness.
             broadphase = None
 
         if broadphase is not None:
@@ -475,17 +670,9 @@ def _clearance_candidate_blocks(
 def _triangulate_samples(domain, samples, opts):
     """Triangulate a multi-layer clearance field without extra grid erosion.
 
-    A valid support sample is already clearance-filtered. Requiring all four
-    corners of a grid quad before emitting any surface adds an unintended extra
-    cell of erosion around doorway/railing boundaries: one rejected corner can
-    cut a false hole through a narrow but otherwise valid passage.
-
-    Each grid quad is therefore treated independently. Four compatible corners
-    produce exactly two non-overlapping triangles. Three compatible corners
-    produce exactly one triangle. Two-corner gaps are never bridged, so a real
-    obstacle strip or missing support remains disconnected. Multiple Z layers are
-    handled by anchoring each layer at the first populated corner and selecting
-    only vertically compatible samples from the other corners.
+    Four compatible corners produce two triangles; three compatible corners
+    produce one triangle; two-corner gaps are never bridged. Multiple Z layers
+    are handled by anchoring each layer at the first populated corner.
     """
     by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
     for sample in samples:
@@ -502,7 +689,6 @@ def _triangulate_samples(domain, samples, opts):
     cells: list[NavCell] = []
     created: set[tuple] = set()
     for ix, iy in sorted(quad_origins):
-        # Counter-clockwise plan order: SW, SE, NE, NW.
         corner_keys = (
             (ix, iy),
             (ix + 1, iy),
@@ -550,7 +736,6 @@ def _quad_layer_triangles(
     selected: dict[int, _SupportSample],
     opts: SurfaceDetectionOptions,
 ) -> list[tuple[_SupportSample, _SupportSample, _SupportSample]]:
-    """Return a non-overlapping triangulation for one sampled grid layer."""
     if len(selected) < 3:
         return []
 
@@ -572,8 +757,6 @@ def _quad_layer_triangles(
     valid_b = all(_triangle_samples_compatible(triangle, opts) for triangle in diagonal_se_nw)
 
     if valid_a and valid_b:
-        # Prefer the diagonal with the smaller vertical jump. This avoids
-        # introducing an unnecessarily sharp fold across a sloped/riser quad.
         rise_a = abs(sw.position[2] - ne.position[2])
         rise_b = abs(se.position[2] - nw.position[2])
         return list(
@@ -666,7 +849,6 @@ def _samples_compatible(a, b, opts, *, diagonal=False):
 def _append_unique_sample(bucket, sample, tolerance):
     for existing in bucket:
         if abs(existing.position[2] - sample.position[2]) <= tolerance:
-            # Prefer the more informative vertical-circulation terrain label.
             if existing.terrain == "open" and sample.terrain != "open":
                 bucket.remove(existing)
                 bucket.append(sample)
