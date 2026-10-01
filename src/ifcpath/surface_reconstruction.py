@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import perf_counter
 
 import ifcopenshell
 import ifcopenshell.geom
@@ -37,6 +38,13 @@ class SurfaceReconstructionStats:
         return asdict(self)
 
 
+def _log_reconstruction_stage(name: str, seconds: float | None = None, **details: object) -> None:
+    detail_text = " ".join(f"{key}={value}" for key, value in sorted(details.items()))
+    seconds_text = "" if seconds is None else f" seconds={seconds:.3f}"
+    suffix = f" {detail_text}" if detail_text else ""
+    print(f"[ifcpath-surface] stage={name}{seconds_text}{suffix}", flush=True)
+
+
 def reconstruct_walkable_surface(
     ifc_path: str | Path,
     model: InavModel,
@@ -63,11 +71,14 @@ def reconstruct_walkable_surface(
     retaining open/stair/ramp geometric continuity.
     """
     stats = SurfaceReconstructionStats()
+
+    stage_started = perf_counter()
     try:
         ifc_file = ifcopenshell.open(str(ifc_path))
     except Exception as exc:
         stats.fallback_reason = f"cannot reopen IFC for physical surface detection: {exc}"
         return stats
+    _log_reconstruction_stage("open_ifc", perf_counter() - stage_started)
 
     detection_options = SurfaceDetectionOptions(
         cell_size_m=max(0.05, float(cell_size_m)),
@@ -76,20 +87,40 @@ def reconstruct_walkable_surface(
         max_slope_deg=max(0.0, min(89.0, float(max_slope_deg))),
         max_climb_m=max(0.0, float(max_climb_m)),
     )
+
+    stage_started = perf_counter()
     domains = _support_domains(
         ifc_file,
         model,
         padding_m=detection_options.cell_size_m * 0.75,
     )
     stats.support_elements = sum(len(domain.support_entity_ids) for domain in domains)
+    _log_reconstruction_stage(
+        "support_domains",
+        perf_counter() - stage_started,
+        domains=len(domains),
+        supports=stats.support_elements,
+    )
     if not domains:
         stats.fallback_reason = "no physical walkable-support IFC elements found"
         return stats
 
+    _log_reconstruction_stage(
+        "detector_start",
+        cell_size_m=detection_options.cell_size_m,
+        radius_m=detection_options.agent_radius_m,
+    )
+    stage_started = perf_counter()
     cells, detector_stats = detect_ifc_walkable_cells(
         ifc_file,
         domains,
         options=detection_options,
+    )
+    _log_reconstruction_stage(
+        "detector",
+        perf_counter() - stage_started,
+        cells=len(cells),
+        rays=detector_stats.rays,
     )
     stats.detector = detector_stats
     if detector_stats.error:
@@ -102,15 +133,23 @@ def reconstruct_walkable_surface(
         )
         return stats
 
+    stage_started = perf_counter()
     _label_cells_from_ifc_spaces(ifc_file, model, cells)
     stats.labelled_cells = sum(cell.space_id is not None for cell in cells)
     stats.unlabelled_cells = len(cells) - stats.labelled_cells
+    _log_reconstruction_stage(
+        "space_labelling",
+        perf_counter() - stage_started,
+        labelled=stats.labelled_cells,
+        unlabelled=stats.unlabelled_cells,
+    )
 
     # The ray detector connects anonymous geometry so it can prune tiny physical
     # patches. Those links are not semantically authoritative. Clear them now and
     # rebuild against the final space labels so only same-space open surfaces or
     # physical vertical terrain remain connected. Doors/open boundaries are
     # authorised later by the portable semantic finalisation pass.
+    stage_started = perf_counter()
     _clear_surface_adjacency(cells)
     connect_cells_by_shared_edges(
         cells,
@@ -143,6 +182,12 @@ def reconstruct_walkable_surface(
     )
     components = surface_components(cells)
     stats.component_count = len(components)
+    _log_reconstruction_stage(
+        "topology_and_seams",
+        perf_counter() - stage_started,
+        components=stats.component_count,
+        seams=stats.seam_count,
+    )
 
     # If spaces exist but the geometry-derived surface cannot be semantically
     # associated at all, keep the known qualified surface rather than publishing
