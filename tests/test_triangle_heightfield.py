@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from types import SimpleNamespace
 
 from ifcpath.heightfield_repair import rejected_bridge_groups
 from ifcpath.raycast_surface import (
@@ -11,6 +12,7 @@ from ifcpath.raycast_surface import (
 )
 from ifcpath.triangle_heightfield import (
     _barycentric_xy,
+    _exact_headroom_blocked,
     _rasterize_triangle,
     _triangle_normal,
 )
@@ -78,6 +80,24 @@ def test_vertical_triangle_does_not_manufacture_column_intersection():
     )
 
     assert dict(columns) == {}
+
+
+class _FakeRayTree:
+    def __init__(self, hit_zs: list[float]) -> None:
+        self.hit_zs = hit_zs
+
+    def select_ray(self, *_args, **_kwargs):
+        return [SimpleNamespace(position=(0.0, 0.0, z)) for z in self.hit_zs]
+
+
+def test_exact_headroom_tie_breaker_accepts_clear_room() -> None:
+    opts = SurfaceDetectionOptions(agent_height_m=1.8, hit_merge_tolerance_m=0.025)
+    assert _exact_headroom_blocked(_FakeRayTree([]), (0.0, 0.0, 0.0), opts) is False
+
+
+def test_exact_headroom_tie_breaker_rejects_low_obstacle() -> None:
+    opts = SurfaceDetectionOptions(agent_height_m=1.8, hit_merge_tolerance_m=0.025)
+    assert _exact_headroom_blocked(_FakeRayTree([1.20]), (0.0, 0.0, 0.0), opts) is True
 
 
 def _sample(ix: int, iy: int, z: float = 0.0) -> _SupportSample:
