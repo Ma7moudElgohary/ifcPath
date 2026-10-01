@@ -10,7 +10,7 @@ from typing import Callable
 import ifcopenshell.geom
 from shapely.geometry import Point
 
-from .heightfield_repair import rejected_bridge_groups, span_key
+from .heightfield_repair import span_key
 from .model import NavCell, Vec3
 from .raycast_surface import (
     SurfaceDetectionOptions,
@@ -33,11 +33,16 @@ from .raycast_surface import (
     _triangulate_samples,
     ifc_walkable_support_role,
 )
+from .semantic_heightfield_repair import (
+    build_semantic_repair_regions,
+    semantic_bridge_paths,
+)
 from .surface_nav import connect_cells_by_shared_edges
 
 
 _MAX_REPAIR_EXACT_CHECKS = 128
 _MAX_REPAIR_ROUNDS = 3
+_MAX_REPAIR_PATH_SPANS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +57,7 @@ class _RepairTelemetry:
     candidates: int = 0
     exact_checks: int = 0
     restored: int = 0
+    region_seconds: float = 0.0
     tree_seconds: float = 0.0
     exact_seconds: float = 0.0
 
@@ -66,10 +72,10 @@ def detect_ifc_walkable_cells_heightfield(
     """Reconstruct walkable NavCells from a triangulated multilayer heightfield.
 
     IFC geometry is rasterized once into a fast multilayer field. Agent-radius
-    erosion remains conservative, but rejected span chains that are the only link
-    between distinct accepted field components receive the previous exact OCC body
-    clearance test. This recovers quantisation-sensitive narrow passages without
-    returning to exact clearance at every support sample.
+    erosion remains conservative. If that field splits an authored room, only a
+    short radius-rejected bridge path inside that same room is sent through the
+    previous exact OCC body-clearance test. IfcSpace therefore prioritizes exact
+    verification but never manufactures walkable geometry.
     """
     opts = options or SurfaceDetectionOptions()
     stats = SurfaceDetectionStats(domains=len(domains))
@@ -120,6 +126,7 @@ def detect_ifc_walkable_cells_heightfield(
             f"repair_candidates={repair.candidates} "
             f"repair_checks={repair.exact_checks} "
             f"repair_restored={repair.restored} "
+            f"repair_region_seconds={repair.region_seconds:.3f} "
             f"repair_tree_seconds={repair.tree_seconds:.3f} "
             f"repair_exact_seconds={repair.exact_seconds:.3f}",
             flush=True,
@@ -474,6 +481,12 @@ def _repair_field_bottlenecks_exact(
     if not remaining:
         return accepted
 
+    region_started = perf_counter()
+    regions = build_semantic_repair_regions(ifc_file)
+    telemetry.region_seconds += perf_counter() - region_started
+    if not regions:
+        return accepted
+
     current = list(accepted)
     checked: set[tuple[int, int, int]] = set()
     tree = None
@@ -485,15 +498,32 @@ def _repair_field_bottlenecks_exact(
             for span in remaining
             if span_key(span, opts.hit_merge_tolerance_m) not in checked
         ]
-        groups = rejected_bridge_groups(unchecked, current, opts)
-        if not groups:
+        paths = semantic_bridge_paths(
+            regions,
+            unchecked,
+            current,
+            opts,
+            max_path_spans=_MAX_REPAIR_PATH_SPANS,
+        )
+        if not paths:
             break
 
         available_budget = _MAX_REPAIR_EXACT_CHECKS - telemetry.exact_checks
-        groups = [group for group in groups if len(group) <= available_budget]
-        if not groups:
+        candidates: list[_WalkableSpan] = []
+        candidate_keys: set[tuple[int, int, int]] = set()
+        for path in paths:
+            for span in path:
+                key = span_key(span, opts.hit_merge_tolerance_m)
+                if key in checked or key in candidate_keys:
+                    continue
+                if len(candidates) >= available_budget:
+                    break
+                candidates.append(span)
+                candidate_keys.add(key)
+            if len(candidates) >= available_budget:
+                break
+        if not candidates:
             break
-        candidates = [span for group in groups for span in group]
         telemetry.candidates += len(candidates)
 
         if tree is None:
