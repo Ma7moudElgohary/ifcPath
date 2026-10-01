@@ -85,9 +85,6 @@ def stitch_exact_verified_open_seams(
         if region is None:
             continue
 
-        # Union-find lets one verified crossing collapse a component pair before
-        # evaluating later candidates. This is important for malformed spaces with
-        # three or more fragments and prevents redundant OCC work.
         parent = list(range(len(components)))
 
         def find(index: int) -> int:
@@ -253,8 +250,6 @@ def _verify_crossing(
     count = max(2, int(math.ceil(distance / max(0.03, sample_spacing_m))))
     min_up = math.cos(math.radians(options.max_slope_deg))
 
-    # Endpoints already belong to accepted triangles. Verify only the interior
-    # interpolation samples, where the heightfield omitted geometry.
     for index in range(1, count):
         t = index / count
         expected = _lerp(start, end, t)
@@ -274,13 +269,13 @@ def _verify_crossing(
         if support is None:
             stats.rejected_support += 1
             return False
-        entity_id, position = support
+        underfoot_ids, position = support
 
         stats.exact_body_checks += 1
         if _body_clearance_blocked(
             tree,
             ifc_file,
-            ignored_entity_ids={entity_id},
+            ignored_entity_ids=underfoot_ids,
             position=position,
             opts=options,
             classify=_entity_class,
@@ -298,7 +293,8 @@ def _support_hit_near(
     *,
     z_tolerance_m: float,
     min_up: float,
-) -> tuple[int, Vec3] | None:
+) -> tuple[frozenset[int], Vec3] | None:
+    """Return all coincident underfoot support ids plus the nearest support Z."""
     vertical = max(0.30, options.max_climb_m + 0.12)
     origin = (expected[0], expected[1], expected[2] + vertical)
     try:
@@ -306,6 +302,10 @@ def _support_hit_near(
     except Exception:
         return None
     hits.sort(key=lambda hit: float(getattr(hit, "distance", 0.0)))
+
+    support_ids: set[int] = set()
+    closest_position: Vec3 | None = None
+    closest_delta = math.inf
     for hit in hits:
         entity = _hit_entity(ifc_file, hit)
         if entity is None or ifc_walkable_support_role(entity) is None:
@@ -318,10 +318,17 @@ def _support_hit_near(
             continue
         if abs(normal[2]) < min_up:
             continue
-        if abs(position[2] - expected[2]) > z_tolerance_m:
+        delta = abs(position[2] - expected[2])
+        if delta > z_tolerance_m:
             continue
-        return entity_id, (expected[0], expected[1], position[2])
-    return None
+        support_ids.add(entity_id)
+        if delta < closest_delta:
+            closest_delta = delta
+            closest_position = (expected[0], expected[1], position[2])
+
+    if not support_ids or closest_position is None:
+        return None
+    return frozenset(support_ids), closest_position
 
 
 def _interval_gap(a0: float, a1: float, b0: float, b1: float) -> float:
