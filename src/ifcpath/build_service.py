@@ -7,6 +7,7 @@ from typing import Any
 
 from .exporter import model_from_dict
 from .ifc_loader import BuildOptions, build_from_ifc
+from .semantic_skeleton import build_semantic_skeleton_from_ifc
 from .surface_fragments import prune_tiny_space_fragments
 from .surface_reconstruction import reconstruct_walkable_surface
 from .validation import validate_model
@@ -31,12 +32,15 @@ def build_inav_payload(
 ) -> dict[str, Any]:
     """Build and qualify portable INAV directly from uploaded IFC bytes.
 
-    The legacy importer still extracts IFC semantics and supplies a qualified
-    fallback surface. Before portable semantic finalization, the local app now
-    attempts to replace those cells with a physical support surface reconstructed
-    from the complete IFC geometry. This makes floors/stairs/ramps and collision
-    clearance authoritative while retaining a deterministic fallback during
-    corpus qualification.
+    The local app first extracts a semantic skeleton (levels, spaces and authored
+    doors) and lets complete IFC geometry create the authoritative physical
+    surface. Building the old sampled/CDT compatibility graph first is wasted work
+    when that graph is immediately replaced, especially in the frozen Windows app.
+
+    Safety is preserved in both exceptional cases: IFCs containing elevators use
+    the full importer until elevator semantics have a graph-free extraction path,
+    and a failed physical reconstruction triggers the full legacy importer before
+    returning a qualified fallback surface.
     """
     if not data:
         raise IfcBuildRequestError("IFC upload is empty")
@@ -63,13 +67,17 @@ def build_inav_payload(
         surface_cell_size_m = min(max(resolved_options.stair_spacing_m, 0.10), 0.20)
 
         stage_started = perf_counter()
-        raw_model = build_from_ifc(temp_path, resolved_options)
-        stage_seconds["legacy_import"] = perf_counter() - stage_started
+        raw_model = build_semantic_skeleton_from_ifc(temp_path, resolved_options)
+        stage_seconds["semantic_import"] = perf_counter() - stage_started
+        import_mode = str(raw_model.metadata.get("semantic_import_mode", "semantics-only"))
         _log_build_stage(
-            "legacy_import",
-            stage_seconds["legacy_import"],
+            "semantic_import",
+            stage_seconds["semantic_import"],
+            mode=import_mode,
             cells=len(raw_model.cells),
+            nodes=len(raw_model.nodes),
             spaces=len(raw_model.spaces),
+            portals=len(raw_model.portals),
         )
 
         stage_started = perf_counter()
@@ -93,6 +101,27 @@ def build_inav_payload(
             replaced=surface_stats.replaced_legacy_surface,
             supports=surface_stats.support_elements,
         )
+
+        # The semantic-only path intentionally has no compatibility floor graph.
+        # If physical reconstruction cannot replace it, rebuild the proven legacy
+        # representation rather than returning an empty or partially useful model.
+        if (
+            not surface_stats.replaced_legacy_surface
+            and import_mode == "semantics-only"
+        ):
+            stage_started = perf_counter()
+            raw_model = build_from_ifc(temp_path, resolved_options)
+            stage_seconds["legacy_fallback_import"] = perf_counter() - stage_started
+            raw_model.metadata["semantic_import_mode"] = "full-legacy-physical-fallback"
+            raw_model.metadata["surface_reconstruction"] = surface_stats.to_dict()
+            raw_model.metadata["surface_source"] = "legacy-qualified-fallback"
+            _log_build_stage(
+                "legacy_fallback_import",
+                stage_seconds["legacy_fallback_import"],
+                cells=len(raw_model.cells),
+                nodes=len(raw_model.nodes),
+                spaces=len(raw_model.spaces),
+            )
 
         stage_started = perf_counter()
         if surface_stats.replaced_legacy_surface:
