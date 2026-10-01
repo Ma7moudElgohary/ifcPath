@@ -67,6 +67,7 @@ jobs:
           name: duplex-reference-qualification
           path: |
             /tmp/Duplex_A_20110907.inav
+            /tmp/local_app_physical.inav
             /tmp/qualification.json
             /tmp/surface_route_benchmark.json
             /tmp/surface_vertical_qualification.json
