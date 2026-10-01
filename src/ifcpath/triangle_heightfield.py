@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import multiprocessing
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Callable
@@ -16,15 +16,20 @@ from .raycast_surface import (
     SurfaceDetectionStats,
     SurfaceSamplingDomain,
     _SupportCandidate,
+    _SupportSample,
     _WalkableSpan,
     _append_unique_span,
+    _body_clearance_blocked,
     _cell_geometry_key,
     _column_body_blocked,
     _entity_class,
     _erode_walkable_spans,
+    _field_spans_compatible,
     _group_support_candidates,
+    _native_geometry_tree,
     _preferred_support_candidate,
     _prune_small_components,
+    _span_to_sample,
     _triangulate_samples,
     ifc_walkable_support_role,
 )
@@ -86,6 +91,7 @@ def detect_ifc_walkable_cells_heightfield(
 
         stage_started = perf_counter()
         samples = _spans_from_columns(
+            ifc_file,
             columns,
             entity_cache,
             domain,
@@ -97,7 +103,9 @@ def detect_ifc_walkable_cells_heightfield(
         print(
             "[ifcpath-heightfield] "
             f"stage=filter seconds={perf_counter() - stage_started:.3f} "
-            f"samples={len(samples)} rejected={stats.clearance_rejections}",
+            f"samples={len(samples)} rejected={stats.clearance_rejections} "
+            f"repair_candidates={stats.topology_repair_candidates} "
+            f"repair_restored={stats.topology_repair_restored}",
             flush=True,
         )
         if not samples:
@@ -313,6 +321,7 @@ def _triangle_normal(a, b, c) -> Vec3 | None:
 
 
 def _spans_from_columns(
+    ifc_file,
     columns,
     entity_cache,
     domain,
@@ -415,8 +424,185 @@ def _spans_from_columns(
         stats,
         sampled_xy=sample_keys,
     )
+    result = _repair_field_bottlenecks_exact(
+        ifc_file,
+        domain,
+        spans_by_xy,
+        result,
+        opts,
+        stats,
+        classify,
+    )
     stats.samples += len(result)
     return result
+
+
+def _repair_field_bottlenecks_exact(
+    ifc_file,
+    domain: SurfaceSamplingDomain,
+    spans_by_xy: dict[tuple[int, int], list[_WalkableSpan]],
+    accepted: list[_SupportSample],
+    opts: SurfaceDetectionOptions,
+    stats: SurfaceDetectionStats,
+    classify,
+) -> list[_SupportSample]:
+    """Restore only field-rejected samples that are topological bottlenecks.
+
+    Metric heightfield erosion is deliberately conservative, but a coarse field
+    can reject a small number of otherwise exact-clear samples at a narrow neck.
+    The old all-OCC path proved Duplex topology with ~15k precise queries. Rather
+    than paying that cost everywhere, build components from the fast accepted
+    field and exact-check only rejected spans adjacent to at least two different
+    components. A restored span must therefore both matter to connectivity and
+    pass the previous exact pedestrian-body clearance test.
+    """
+    if opts.agent_radius_m <= 0.0 or not accepted:
+        return accepted
+
+    viable_spans = [
+        span
+        for bucket in spans_by_xy.values()
+        for span in bucket
+        if not span.direct_blocked
+    ]
+    accepted_keys = {_sample_key(sample, opts.hit_merge_tolerance_m) for sample in accepted}
+    rejected = [
+        span
+        for span in viable_spans
+        if _span_key(span, opts.hit_merge_tolerance_m) not in accepted_keys
+    ]
+    if not rejected:
+        return accepted
+
+    current = list(accepted)
+    tree = None
+    support_ids = set(domain.support_entity_ids)
+
+    # A two-cell raster gap needs two restoration rounds: after the first exact-
+    # clear bottleneck is restored it may make the second one component-critical.
+    # Bound the iterations by the number of rejected spans; normally Duplex needs
+    # only a tiny handful.
+    remaining = list(rejected)
+    while remaining:
+        components = _sample_component_ids(current, opts)
+        candidates = [
+            span
+            for span in remaining
+            if _touches_distinct_components(span, current, components, opts)
+        ]
+        if not candidates:
+            break
+
+        stats.topology_repair_candidates += len(candidates)
+        if tree is None:
+            try:
+                tree = _native_geometry_tree(ifc_file)
+                stats.used_native_tree = True
+            except Exception:
+                break
+
+        restored_this_round = 0
+        candidate_keys = {_span_key(span, opts.hit_merge_tolerance_m) for span in candidates}
+        next_remaining: list[_WalkableSpan] = []
+        for span in remaining:
+            span_key = _span_key(span, opts.hit_merge_tolerance_m)
+            if span_key not in candidate_keys:
+                next_remaining.append(span)
+                continue
+
+            stats.topology_repair_exact_checks += 1
+            ignored_support_ids = support_ids or {span.owner_id}
+            blocked = _body_clearance_blocked(
+                tree,
+                ifc_file,
+                ignored_entity_ids=ignored_support_ids,
+                position=span.position,
+                opts=opts,
+                classify=classify,
+                stats=stats,
+            )
+            if blocked:
+                continue
+
+            current.append(_span_to_sample(span))
+            stats.topology_repair_restored += 1
+            stats.heightfield_radius_rejections = max(0, stats.heightfield_radius_rejections - 1)
+            stats.clearance_rejections = max(0, stats.clearance_rejections - 1)
+            restored_this_round += 1
+
+        remaining = next_remaining
+        if restored_this_round == 0:
+            break
+
+    return current
+
+
+def _sample_key(sample: _SupportSample, tolerance: float) -> tuple[int, int, int]:
+    scale = 1.0 / max(1e-6, tolerance)
+    return sample.ix, sample.iy, round(sample.position[2] * scale)
+
+
+def _span_key(span: _WalkableSpan, tolerance: float) -> tuple[int, int, int]:
+    scale = 1.0 / max(1e-6, tolerance)
+    return span.ix, span.iy, round(span.position[2] * scale)
+
+
+def _sample_component_ids(samples: list[_SupportSample], opts: SurfaceDetectionOptions) -> dict[tuple[int, int, int], int]:
+    by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
+    for sample in samples:
+        by_xy[(sample.ix, sample.iy)].append(sample)
+
+    component_ids: dict[tuple[int, int, int], int] = {}
+    component = 0
+    for sample in samples:
+        key = _sample_key(sample, opts.hit_merge_tolerance_m)
+        if key in component_ids:
+            continue
+        component_ids[key] = component
+        queue = deque([sample])
+        while queue:
+            current = queue.popleft()
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                for neighbor in by_xy.get((current.ix + dx, current.iy + dy), ()):
+                    neighbor_key = _sample_key(neighbor, opts.hit_merge_tolerance_m)
+                    if neighbor_key in component_ids:
+                        continue
+                    if not _sample_layers_compatible(current, neighbor, opts, dx, dy):
+                        continue
+                    component_ids[neighbor_key] = component
+                    queue.append(neighbor)
+        component += 1
+    return component_ids
+
+
+def _touches_distinct_components(
+    span: _WalkableSpan,
+    samples: list[_SupportSample],
+    component_ids: dict[tuple[int, int, int], int],
+    opts: SurfaceDetectionOptions,
+) -> bool:
+    by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
+    for sample in samples:
+        by_xy[(sample.ix, sample.iy)].append(sample)
+
+    touched: set[int] = set()
+    span_sample = _span_to_sample(span)
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for neighbor in by_xy.get((span.ix + dx, span.iy + dy), ()):
+            if not _sample_layers_compatible(span_sample, neighbor, opts, dx, dy):
+                continue
+            component_id = component_ids.get(_sample_key(neighbor, opts.hit_merge_tolerance_m))
+            if component_id is not None:
+                touched.add(component_id)
+                if len(touched) >= 2:
+                    return True
+    return False
+
+
+def _sample_layers_compatible(a: _SupportSample, b: _SupportSample, opts: SurfaceDetectionOptions, dx: int, dy: int) -> bool:
+    a_span = _WalkableSpan(a.ix, a.iy, a.position, a.owner_id, a.terrain, None, math.inf, False)
+    b_span = _WalkableSpan(b.ix, b.iy, b.position, b.owner_id, b.terrain, None, math.inf, False)
+    return _field_spans_compatible(a_span, b_span, opts, dx, dy)
 
 
 def _nearest_distinct_surface_above(index, positions, z, tolerance):
