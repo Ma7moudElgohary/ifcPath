@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
@@ -189,10 +190,6 @@ def reconstruct_walkable_surface(
         seams=stats.seam_count,
     )
 
-    # If spaces exist but the geometry-derived surface cannot be semantically
-    # associated at all, keep the known qualified surface rather than publishing
-    # a geometry-only model that would break door binding. Space-free IFCs remain
-    # valid geometry probes and may intentionally have no labels.
     if model.spaces and stats.labelled_cells == 0:
         stats.fallback_reason = "detected surface could not be associated with any IFC space"
         return stats
@@ -224,16 +221,11 @@ def _support_domains(
 ) -> list[SurfaceSamplingDomain]:
     """Build one global multi-layer support domain from all physical supports.
 
-    A building can contain several coincident support representations (structural
-    slab + finish) and many storeys at the same XY. Scanning per element repeats
-    the same expensive geometry-tree ray. A single domain casts each XY ray once
-    through the complete vertical extent and retains every compatible support hit,
-    which is the multi-layer-heightfield behaviour needed for indoor navigation.
-
-    ``clip_xy`` is the union of buffered support footprints, preventing the global
-    bounding box from turning into a huge rectangular sampling workload.
+    Support geometry is processed in one iterator instead of calling
+    ``create_shape`` independently for every slab/covering/stair. Besides being
+    faster, this shares IfcOpenShell conversion caches with all support elements.
     """
-    del model  # semantic levels are assigned after physical reconstruction
+    del model
     support_ids: set[int] = set()
     support_bounds: list[tuple[float, float, float, float, float, float]] = []
     footprints = []
@@ -241,13 +233,16 @@ def _support_domains(
         elements = list(ifc_file.by_type("IfcElement"))
     except Exception:
         elements = []
+    support_entities = [
+        entity
+        for entity in elements
+        if ifc_walkable_support_role(entity) is not None
+    ]
 
-    for entity in elements:
-        if ifc_walkable_support_role(entity) is None:
+    for entity, mesh in _iter_entity_meshes(ifc_file, support_entities):
+        if mesh is None or not mesh[0]:
             continue
-        bounds = _bbox(entity)
-        if bounds is None:
-            continue
+        bounds = _bbox_from_vertices(mesh[0])
         try:
             support_ids.add(int(entity.id()))
         except Exception:
@@ -278,7 +273,7 @@ def _support_domains(
             id="support:multilayer",
             bounds=bounds,
             support_entity_ids=frozenset(support_ids),
-            terrain="",  # classify every ray hit from its actual IFC support type
+            terrain="",
             clip_xy=clip_xy,
         )
     ]
@@ -305,8 +300,7 @@ def _label_cells_from_ifc_spaces(ifc_file, model: InavModel, cells: list[NavCell
     except Exception:
         space_entities = []
 
-    for entity in space_entities:
-        mesh = _mesh(entity)
+    for entity, mesh in _iter_entity_meshes(ifc_file, space_entities):
         if mesh is None or not mesh[0]:
             continue
         guid = str(_safe_attr(entity, "GlobalId", ""))
@@ -319,7 +313,6 @@ def _label_cells_from_ifc_spaces(ifc_file, model: InavModel, cells: list[NavCell
             continue
         regions.append((float(polygon.area), bounds, polygon, space))
 
-    # Smallest containing space wins if malformed/nested space geometry overlaps.
     regions.sort(key=lambda item: item[0])
     levels = sorted(model.levels, key=lambda level: level.elevation_m)
 
@@ -337,6 +330,55 @@ def _label_cells_from_ifc_spaces(ifc_file, model: InavModel, cells: list[NavCell
                 levels,
                 key=lambda level: abs(level.elevation_m - center[2]),
             ).id
+
+
+def _iter_entity_meshes(ifc_file, entities):
+    """Yield world-coordinate triangulations using one cached bulk iterator.
+
+    If an iterator backend fails for a specific schema/model, fall back only for
+    the entities that were not yielded. This preserves the previous robust
+    ``create_shape`` behaviour without paying that cost in the normal path.
+    """
+    entities = list(entities)
+    if not entities:
+        return
+
+    yielded_ids: set[int] = set()
+    try:
+        iterator = ifcopenshell.geom.iterator(
+            _settings(),
+            ifc_file,
+            max(1, min(os.cpu_count() or 1, 8)),
+            include=entities,
+        )
+        if iterator.initialize():
+            while True:
+                shape = iterator.get()
+                try:
+                    entity_id = int(shape.id)
+                    entity = ifc_file.by_id(entity_id)
+                except Exception:
+                    entity = None
+                if entity is not None:
+                    mesh = _mesh_from_shape(shape)
+                    if mesh is not None:
+                        yielded_ids.add(entity_id)
+                        yield entity, mesh
+                if not iterator.next():
+                    break
+    except Exception:
+        pass
+
+    for entity in entities:
+        try:
+            entity_id = int(entity.id())
+        except Exception:
+            entity_id = -1
+        if entity_id in yielded_ids:
+            continue
+        mesh = _mesh(entity)
+        if mesh is not None:
+            yield entity, mesh
 
 
 def _entity_level_id(entity, level_by_guid: dict[str, str]) -> str | None:
@@ -386,8 +428,15 @@ def _mesh(entity):
         shape = ifcopenshell.geom.create_shape(_settings(), entity)
     except Exception:
         return None
-    verts = shape.geometry.verts
-    faces = shape.geometry.faces
+    return _mesh_from_shape(shape)
+
+
+def _mesh_from_shape(shape):
+    try:
+        verts = shape.geometry.verts
+        faces = shape.geometry.faces
+    except Exception:
+        return None
     vertices = [
         (float(verts[index]), float(verts[index + 1]), float(verts[index + 2]))
         for index in range(0, len(verts), 3)
