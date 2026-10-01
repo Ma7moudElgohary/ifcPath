@@ -155,7 +155,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release/python-bundle/dist | Out-Null
-          Copy-Item dist/ifcpath-*.whl release/python-bundle/
+          Copy-Item dist/ifcpath-*.whl release/python-bundle/dist/
           Copy-Item scripts/install_local_app.ps1 release/python-bundle/
           Copy-Item docs/LOCAL_APP.md release/python-bundle/README.md
           Compress-Archive -Path release/python-bundle/* -DestinationPath release/IfcPath-Windows-Python-Bundle.zip -Force
