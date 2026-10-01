@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 
 from ifcpath.triangle_heightfield import (
     _barycentric_xy,
@@ -36,7 +37,7 @@ def test_triangle_normal_preserves_walkable_up_component_magnitude():
 
 
 def test_horizontal_triangle_rasterizes_interpolated_surface_hit():
-    columns = {}
+    columns = defaultdict(list)
     sample_keys = {(0, 0), (1, 0), (0, 1), (1, 1)}
 
     _rasterize_triangle(
@@ -56,8 +57,6 @@ def test_horizontal_triangle_rasterizes_interpolated_surface_hit():
 
 
 def test_vertical_triangle_voxelizes_body_barrier():
-    from collections import defaultdict
-
     columns = defaultdict(list)
     sample_keys = {(0, 0), (1, 0)}
 
