@@ -114,9 +114,6 @@ class _WalkableSpan:
     direct_blocked: bool = False
 
 
-# Door/opening geometry represents an authorised aperture rather than an
-# obstruction. IfcSpace is spatial semantics, not a collision body. Windows are
-# intentionally *not* exempt: low/full-height glazing is a real barrier.
 _NON_BLOCKING_CLASSES = {
     "IfcDoor",
     "IfcOpeningElement",
@@ -168,7 +165,7 @@ def detect_ifc_walkable_cells(
     try:
         tree = _native_geometry_tree(ifc_file)
         stats.used_native_tree = True
-    except Exception as exc:  # pragma: no cover - exercised by real-IFC qualification
+    except Exception as exc:  # pragma: no cover
         stats.error = f"native geometry tree unavailable: {exc}"
         return [], stats
 
@@ -176,8 +173,6 @@ def detect_ifc_walkable_cells(
     all_cells: list[NavCell] = []
     seen_cell_geometry: set[tuple] = set()
 
-    # Prefer vertical-circulation domains where geometry overlaps a floor so the
-    # retained cell gets the more informative terrain classification.
     ordered_domains = sorted(domains, key=lambda domain: (domain.terrain == "open", domain.id))
     for domain in ordered_domains:
         samples = _sample_domain(ifc_file, tree, domain, opts, stats, classify)
@@ -242,6 +237,7 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
     support_ids = set(domain.support_entity_ids)
 
     spans_by_xy: dict[tuple[int, int], list[_WalkableSpan]] = defaultdict(list)
+    sampled_xy: set[tuple[int, int]] = set()
     for ix in range(ix0, ix1 + 1):
         x = ix * cell
         for iy in range(iy0, iy1 + 1):
@@ -249,6 +245,7 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
             if domain.clip_xy is not None and not domain.clip_xy.covers(Point(x, y)):
                 continue
 
+            sampled_xy.add((ix, iy))
             stats.rays += 1
             hits = list(
                 tree.select_ray(
@@ -263,8 +260,6 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
             positions = [tuple(float(value) for value in hit.position) for hit in hits]
             entities = [_hit_entity(ifc_file, hit) for hit in hits]
 
-            # Gather support candidates, then collapse duplicate slab/finish/etc.
-            # representations before any clearance work.
             seen_supports: set[int] = set()
             candidates: list[_SupportCandidate] = []
             for index, hit in enumerate(hits):
@@ -337,8 +332,6 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                     )
                     if exact_blocked != direct_blocked:
                         stats.clearance_verification_mismatches += 1
-                    # Verification mode stays conservative: a disagreement cannot
-                    # manufacture walkable space while the field is being tuned.
                     direct_blocked = direct_blocked or exact_blocked
 
                 if direct_blocked:
@@ -361,7 +354,12 @@ def _sample_domain(ifc_file, tree, domain, opts, stats, classify):
                 )
 
     stats.heightfield_spans += sum(len(bucket) for bucket in spans_by_xy.values())
-    result = _erode_walkable_spans(spans_by_xy, opts, stats)
+    result = _erode_walkable_spans(
+        spans_by_xy,
+        opts,
+        stats,
+        sampled_xy=sampled_xy,
+    )
     stats.samples += len(result)
     return result
 
@@ -390,14 +388,7 @@ def _column_body_blocked(
     opts,
     classify,
 ):
-    """Classify body occupancy from the already-computed vertical ray column.
-
-    Recast rasterizes geometry into vertical spans and performs clearance on the
-    resulting field. Here IFC/OCC ray intersections provide the equivalent span
-    boundaries. Hits belonging to the same physical element are paired into
-    solid vertical intervals; if one overlaps the pedestrian body interval, the
-    support span is directly blocked. No additional OCC select() call is needed.
-    """
+    """Classify body occupancy from the already-computed vertical ray column."""
     body_low = float(support_z) + max(opts.hit_merge_tolerance_m, 0.01)
     body_high = float(support_z) + max(opts.agent_height_m, opts.agent_radius_m * 2.0)
     by_entity: dict[int, list[float]] = defaultdict(list)
@@ -423,9 +414,6 @@ def _column_body_blocked(
         if not levels:
             continue
 
-        # Ray intersections of closed solids normally arrive as top/bottom pairs.
-        # Pair them in descending order so a wall/column occupying the full body
-        # height is detected even when neither face lies near chest height.
         pair_count = len(levels) // 2
         for pair_index in range(pair_count):
             high = levels[pair_index * 2]
@@ -433,8 +421,6 @@ def _column_body_blocked(
             if _intervals_overlap(low, high, body_low, body_high, tolerance):
                 return True
 
-        # Degenerate/open shells can expose an unmatched surface. Treat an
-        # unmatched hit inside the body interval conservatively as blocking.
         if len(levels) % 2:
             lone = levels[-1]
             if body_low - tolerance <= lone <= body_high + tolerance:
@@ -456,13 +442,20 @@ def _intervals_overlap(low_a, high_a, low_b, high_b, tolerance):
     return high_a > low_b + tolerance and low_a < high_b - tolerance
 
 
-def _erode_walkable_spans(spans_by_xy, opts, stats=None):
-    """Apply agent-radius clearance to the multilayer span field.
+def _erode_walkable_spans(
+    spans_by_xy,
+    opts,
+    stats=None,
+    *,
+    sampled_xy=None,
+):
+    """Apply metric, layer-aware agent-radius erosion to the span field.
 
-    Erosion is metric in XY and layer-aware in Z. A blocked/missing neighbour
-    only affects a span when no vertically compatible walkable span exists at
-    that neighbour, so obstacles on another storey do not erode this storey.
-    Stair runs remain compatible through normal tread/riser height changes.
+    Only coordinates that were actually sampled may behave as missing/blocked
+    neighbours. Coordinates outside the sampling clip are acceleration/domain
+    boundaries, not physical obstacles, and must not carve false notches into a
+    valid floor. Inside the sampled mask, a missing compatible span still acts as
+    a ledge/obstruction and is eroded normally.
     """
     viable_by_xy: dict[tuple[int, int], list[_WalkableSpan]] = defaultdict(list)
     for key, bucket in spans_by_xy.items():
@@ -475,12 +468,10 @@ def _erode_walkable_spans(spans_by_xy, opts, stats=None):
             for span in bucket
         ]
 
+    coverage = set(spans_by_xy) if sampled_xy is None else set(sampled_xy)
     cell = max(0.05, float(opts.cell_size_m))
     radius = float(opts.agent_radius_m)
     radius_cells = max(1, math.ceil(radius / cell))
-    # A blocked grid cell represents an area around its centre, not a zero-area
-    # point. Expanding by half a cell approximates distance to that cell boundary
-    # while keeping Euclidean rather than Manhattan/square-grid erosion.
     threshold = radius + cell * 0.5
     offsets = [
         (dx, dy)
@@ -494,7 +485,10 @@ def _erode_walkable_spans(spans_by_xy, opts, stats=None):
         for span in viable_by_xy[key]:
             rejected = False
             for dx, dy in offsets:
-                neighbours = viable_by_xy.get((span.ix + dx, span.iy + dy), ())
+                neighbour_key = (span.ix + dx, span.iy + dy)
+                if neighbour_key not in coverage:
+                    continue
+                neighbours = viable_by_xy.get(neighbour_key, ())
                 if any(_field_spans_compatible(span, neighbour, opts) for neighbour in neighbours):
                     continue
                 rejected = True
@@ -533,8 +527,6 @@ def _append_unique_span(bucket, span, tolerance):
     for existing in list(bucket):
         if abs(existing.position[2] - span.position[2]) > tolerance:
             continue
-        # A duplicate physical layer is blocked if any coincident representation
-        # says it is blocked; otherwise preserve the most informative terrain.
         if existing.direct_blocked and not span.direct_blocked:
             return
         if span.direct_blocked and not existing.direct_blocked:
@@ -668,12 +660,6 @@ def _clearance_candidate_blocks(
 
 
 def _triangulate_samples(domain, samples, opts):
-    """Triangulate a multi-layer clearance field without extra grid erosion.
-
-    Four compatible corners produce two triangles; three compatible corners
-    produce one triangle; two-corner gaps are never bridged. Multiple Z layers
-    are handled by anchoring each layer at the first populated corner.
-    """
     by_xy: dict[tuple[int, int], list[_SupportSample]] = defaultdict(list)
     for sample in samples:
         by_xy[(sample.ix, sample.iy)].append(sample)
