@@ -64,12 +64,7 @@ def build_inav_payload(
             temp_path = Path(stream.name)
 
         resolved_options = options or BuildOptions()
-        # A 0.20 m clearance field can collapse a physically passable ~1 m neck
-        # to a single sample row after a 0.22 m body-radius erosion. One row has
-        # no area and therefore cannot form NavCells. Cap the authoritative field
-        # at 0.15 m: this preserves two-dimensional passage geometry without the
-        # roughly 4x XY workload of immediately dropping to a 0.10 m global grid.
-        surface_cell_size_m = min(max(resolved_options.stair_spacing_m, 0.10), 0.15)
+        surface_cell_size_m = min(max(resolved_options.stair_spacing_m, 0.10), 0.20)
 
         stage_started = perf_counter()
         raw_model = build_semantic_skeleton_from_ifc(temp_path, resolved_options)
@@ -91,9 +86,6 @@ def build_inav_payload(
             raw_model,
             cell_size_m=surface_cell_size_m,
             agent_height_m=resolved_options.agent_height_m,
-            # A zero-radius centreline navmesh is exactly the behaviour that let
-            # routes touch furniture/railings. Use a human-body default unless
-            # the caller explicitly requests a larger clearance.
             agent_radius_m=max(0.22, resolved_options.agent_clearance_m),
             max_slope_deg=resolved_options.max_slope_deg,
             max_climb_m=0.24,
@@ -107,13 +99,7 @@ def build_inav_payload(
             supports=surface_stats.support_elements,
         )
 
-        # The semantic-only path intentionally has no compatibility floor graph.
-        # If physical reconstruction cannot replace it, rebuild the proven legacy
-        # representation rather than returning an empty or partially useful model.
-        if (
-            not surface_stats.replaced_legacy_surface
-            and import_mode == "semantics-only"
-        ):
+        if not surface_stats.replaced_legacy_surface and import_mode == "semantics-only":
             stage_started = perf_counter()
             raw_model = build_from_ifc(temp_path, resolved_options)
             stage_seconds["legacy_fallback_import"] = perf_counter() - stage_started
@@ -130,10 +116,6 @@ def build_inav_payload(
 
         stage_started = perf_counter()
         if surface_stats.replaced_legacy_surface:
-            # Grid/BRep intersections can leave tiny detached triangles inside a
-            # correctly labelled room. Before semantic binding, authored portal
-            # proximity is conservative evidence that a tiny patch could be a real
-            # threshold, so keep it for the first finalisation pass.
             fragment_stats = prune_tiny_space_fragments(
                 raw_model.cells,
                 raw_model,
@@ -157,8 +139,6 @@ def build_inav_payload(
             cells=len(raw_model.cells),
         )
 
-        # First semantic pass binds real door/open-boundary crossings and derives
-        # vertical resources from the reconstructed physical manifold.
         stage_started = perf_counter()
         model = model_from_dict(raw_model.to_dict())
         stage_seconds["semantic_finalization"] = perf_counter() - stage_started
@@ -171,11 +151,6 @@ def build_inav_payload(
 
         stage_started = perf_counter()
         if surface_stats.replaced_legacy_surface:
-            # Now that portal_ids are authoritative, portal *proximity* alone is no
-            # longer a reason to retain a tiny island. This second conservative pass
-            # removes an unused door-near sampling sliver while explicitly protecting
-            # any component that participates in a bound semantic crossing or actual
-            # stair/ramp/escalator connection.
             post_stats = prune_tiny_space_fragments(
                 model.cells,
                 model,
@@ -192,9 +167,6 @@ def build_inav_payload(
             }
             model.metadata["cell_count"] = len(model.cells)
             if post_stats.removed_cells:
-                # Re-run the shared idempotent portable finalisation so door/open
-                # boundary and surface-vertical semantics are rebuilt against the
-                # cleaned authoritative cell set.
                 model = model_from_dict(model.to_dict())
         stage_seconds["postbind_cleanup"] = perf_counter() - stage_started
         _log_build_stage(
