@@ -64,7 +64,12 @@ def build_inav_payload(
             temp_path = Path(stream.name)
 
         resolved_options = options or BuildOptions()
-        surface_cell_size_m = min(max(resolved_options.stair_spacing_m, 0.10), 0.20)
+        # A 0.20 m clearance field can collapse a physically passable ~1 m neck
+        # to a single sample row after a 0.22 m body-radius erosion. One row has
+        # no area and therefore cannot form NavCells. Cap the authoritative field
+        # at 0.15 m: this preserves two-dimensional passage geometry without the
+        # roughly 4x XY workload of immediately dropping to a 0.10 m global grid.
+        surface_cell_size_m = min(max(resolved_options.stair_spacing_m, 0.10), 0.15)
 
         stage_started = perf_counter()
         raw_model = build_semantic_skeleton_from_ifc(temp_path, resolved_options)
